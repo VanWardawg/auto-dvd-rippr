@@ -1,0 +1,380 @@
+import json
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any
+
+from .config import AppConfig
+from .state import append_job_log
+
+
+class JobDeleteError(RuntimeError):
+    pass
+
+
+def _table_exists(conn, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _table_has_column(conn, table: str, column: str) -> bool:
+    if not _table_exists(conn, table):
+        return False
+    cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(str(r["name"]) == column for r in cols)
+
+
+def delete_job(conn, staging_root: str, job_id: str) -> dict[str, Any]:
+    exists = conn.execute("SELECT id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if not exists:
+        raise JobDeleteError(f"Job not found: {job_id}")
+
+    out_rows = []
+    if _table_has_column(conn, "outputs", "job_id"):
+        out_rows = conn.execute("SELECT id FROM outputs WHERE job_id = ?", (job_id,)).fetchall()
+    output_ids = [int(r["id"]) for r in out_rows]
+    if _table_has_column(conn, "transfer_attempts", "output_id"):
+        for out_id in output_ids:
+            conn.execute("DELETE FROM transfer_attempts WHERE output_id = ?", (out_id,))
+
+    tables_with_job_fk = [
+        "finalized_manifests",
+        "outputs",
+        "split_plans",
+        "episode_mappings",
+        "tmdb_candidates",
+        "rip_titles",
+        "job_logs",
+        "job_selected_media",
+    ]
+    deleted_counts: dict[str, int] = {}
+    for table in tables_with_job_fk:
+        if not _table_has_column(conn, table, "job_id"):
+            continue
+        cur = conn.execute(f"DELETE FROM {table} WHERE job_id = ?", (job_id,))
+        deleted_counts[table] = int(cur.rowcount if cur.rowcount is not None else 0)
+
+    # jobs table uses primary key column "id", not "job_id".
+    cur = conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+    deleted_counts["jobs"] = int(cur.rowcount if cur.rowcount is not None else 0)
+
+    conn.commit()
+
+    job_dir = Path(staging_root) / "jobs" / job_id
+    removed_job_dir = False
+    if job_dir.exists():
+        shutil.rmtree(job_dir, ignore_errors=True)
+        removed_job_dir = True
+
+    return {
+        "job_id": job_id,
+        "removed_job_dir": removed_job_dir,
+        "deleted_counts": deleted_counts,
+        "deleted_transfer_attempts": len(output_ids),
+    }
+
+
+def clear_job_local_artifacts(conn, staging_root: str, job_id: str) -> dict[str, Any]:
+    exists = conn.execute("SELECT id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if not exists:
+        raise JobDeleteError(f"Job not found: {job_id}")
+
+    job_dir = Path(staging_root) / "jobs" / job_id
+    removable_dirs = [
+        job_dir / "rip_output",
+        job_dir / "split_output",
+        job_dir / "finalized",
+        job_dir / "menu_analysis",
+        job_dir / "dvdnav_menu",
+        job_dir / "dvd_arch_menu",
+        job_dir / "ocr",
+    ]
+    removed: list[str] = []
+    for path in removable_dirs:
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(str(path))
+
+    db_cleanup_warning = None
+    try:
+        out_rows = []
+        if _table_has_column(conn, "outputs", "job_id"):
+            out_rows = conn.execute("SELECT id FROM outputs WHERE job_id = ?", (job_id,)).fetchall()
+        output_ids = [int(r["id"]) for r in out_rows]
+        if _table_has_column(conn, "transfer_attempts", "output_id"):
+            for out_id in output_ids:
+                conn.execute("DELETE FROM transfer_attempts WHERE output_id = ?", (out_id,))
+
+        if _table_has_column(conn, "job_selected_movies", "rip_title_id") and _table_has_column(conn, "job_selected_movies", "job_id"):
+            conn.execute(
+                """
+                UPDATE job_selected_movies
+                SET rip_title_id = NULL
+                WHERE job_id = ?
+                """,
+                (job_id,),
+            )
+
+        if _table_has_column(conn, "outputs", "job_id"):
+            conn.execute("DELETE FROM outputs WHERE job_id = ?", (job_id,))
+        if _table_has_column(conn, "split_plans", "job_id"):
+            conn.execute("DELETE FROM split_plans WHERE job_id = ?", (job_id,))
+        if _table_has_column(conn, "episode_mappings", "job_id"):
+            conn.execute("DELETE FROM episode_mappings WHERE job_id = ?", (job_id,))
+        if _table_has_column(conn, "rip_titles", "job_id"):
+            conn.execute("DELETE FROM rip_titles WHERE job_id = ?", (job_id,))
+        if _table_has_column(conn, "finalized_manifests", "job_id"):
+            conn.execute("DELETE FROM finalized_manifests WHERE job_id = ?", (job_id,))
+        conn.commit()
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        db_cleanup_warning = str(exc)
+
+    return {
+        "job_id": job_id,
+        "removed_paths": removed,
+        "db_cleanup_warning": db_cleanup_warning,
+    }
+
+
+def clear_job_output_artifacts(conn, job_id: str) -> dict[str, Any]:
+    exists = conn.execute("SELECT id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if not exists:
+        raise JobDeleteError(f"Job not found: {job_id}")
+
+    out_rows = []
+    if _table_has_column(conn, "outputs", "job_id"):
+        out_rows = conn.execute(
+            "SELECT id, local_path, nas_path FROM outputs WHERE job_id = ? ORDER BY id ASC",
+            (job_id,),
+        ).fetchall()
+    output_ids = [int(r["id"]) for r in out_rows]
+
+    removed_files: list[str] = []
+    for row in out_rows:
+        for column in ("local_path", "nas_path"):
+            path_value = row[column]
+            if not path_value:
+                continue
+            path = Path(str(path_value))
+            if path.exists() and path.is_file():
+                try:
+                    path.unlink()
+                    removed_files.append(str(path))
+                except OSError:
+                    pass
+
+    if _table_has_column(conn, "transfer_attempts", "output_id"):
+        for out_id in output_ids:
+            conn.execute("DELETE FROM transfer_attempts WHERE output_id = ?", (out_id,))
+
+    if _table_has_column(conn, "outputs", "job_id"):
+        conn.execute("DELETE FROM outputs WHERE job_id = ?", (job_id,))
+    if _table_has_column(conn, "finalized_manifests", "job_id"):
+        conn.execute("DELETE FROM finalized_manifests WHERE job_id = ?", (job_id,))
+    conn.commit()
+
+    return {
+        "job_id": job_id,
+        "removed_output_files": removed_files,
+        "deleted_transfer_attempts": len(output_ids),
+    }
+
+
+def remap_job_remote_output(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
+    job = conn.execute(
+        """
+        SELECT id, media_type, movie_mode
+        FROM jobs
+        WHERE id = ?
+        """,
+        (job_id,),
+    ).fetchone()
+    if not job:
+        raise JobDeleteError(f"Job not found: {job_id}")
+
+    if str(job["media_type"] or "movie") != "movie" or str(job["movie_mode"] or "single") != "single":
+        raise JobDeleteError("Remote remap currently supports single-movie jobs only.")
+
+    selected_media = conn.execute(
+        """
+        SELECT title, year
+        FROM job_selected_media
+        WHERE job_id = ?
+        """,
+        (job_id,),
+    ).fetchone()
+    if not selected_media:
+        raise JobDeleteError("No selected movie metadata found for remote remap.")
+
+    dest_path = _build_movie_remote_path(cfg.nas_root, str(selected_media["title"] or ""), selected_media["year"])
+    if dest_path.exists():
+        append_job_log(conn, job_id, "INFO", f"Remote remap skipped; output already at {dest_path}", None, None)
+        conn.commit()
+        return {
+            "job_id": job_id,
+            "status": "already_correct",
+            "destination_path": str(dest_path),
+        }
+
+    source_candidates = _find_remote_movie_candidates(conn, cfg.nas_root, job_id, dest_path)
+    if not source_candidates:
+        raise JobDeleteError("No remote movie output found at candidate paths for this job.")
+    if len(source_candidates) > 1:
+        raise JobDeleteError(
+            "Multiple remote movie outputs matched candidate paths: "
+            + "; ".join(str(path) for path in source_candidates)
+        )
+
+    source_path = source_candidates[0]
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source_path), str(dest_path))
+    _remove_empty_parent_dir(source_path.parent)
+
+    if _table_has_column(conn, "outputs", "job_id") and _table_has_column(conn, "outputs", "nas_path"):
+        conn.execute(
+            """
+            UPDATE outputs
+            SET nas_path = ?, transfer_status = 'done', last_error = NULL
+            WHERE job_id = ?
+            """,
+            (str(dest_path), job_id),
+        )
+    append_job_log(conn, job_id, "INFO", f"Remote output remapped: {source_path} -> {dest_path}", None, None)
+    conn.commit()
+    return {
+        "job_id": job_id,
+        "status": "moved",
+        "source_path": str(source_path),
+        "destination_path": str(dest_path),
+    }
+
+
+def cancel_job(conn, job_id: str) -> dict[str, Any]:
+    exists = conn.execute("SELECT id, status FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if not exists:
+        raise JobDeleteError(f"Job not found: {job_id}")
+
+    stopped_pids = _stop_job_processes(job_id)
+    conn.execute(
+        """
+        UPDATE jobs
+        SET status = 'error', current_stage = 'error', error_message = ?, updated_at = datetime('now')
+        WHERE id = ?
+        """,
+        ("Cancelled by user.", job_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO job_logs (job_id, timestamp, level, message, from_status, to_status)
+        VALUES (?, datetime('now'), 'WARNING', ?, ?, 'error')
+        """,
+        (job_id, f"Job cancelled by user. Stopped PIDs: {stopped_pids}", str(exists["status"])),
+    )
+    conn.commit()
+    return {"job_id": job_id, "stopped_pids": stopped_pids}
+
+
+def _find_remote_movie_candidates(conn, nas_root: str, job_id: str, dest_path: Path) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    if _table_has_column(conn, "outputs", "job_id") and _table_has_column(conn, "outputs", "nas_path"):
+        output_rows = conn.execute(
+            """
+            SELECT nas_path
+            FROM outputs
+            WHERE job_id = ?
+            ORDER BY id ASC
+            """,
+            (job_id,),
+        ).fetchall()
+        for row in output_rows:
+            nas_path = row["nas_path"]
+            if not nas_path:
+                continue
+            path = Path(str(nas_path))
+            if path.exists() and path != dest_path and str(path) not in seen:
+                seen.add(str(path))
+                candidates.append(path)
+
+    tmdb_rows = conn.execute(
+        """
+        SELECT title, year
+        FROM tmdb_candidates
+        WHERE job_id = ?
+        ORDER BY selected DESC, score DESC, id ASC
+        """,
+        (job_id,),
+    ).fetchall()
+    for row in tmdb_rows:
+        title = str(row["title"] or "").strip()
+        if not title:
+            continue
+        path = _build_movie_remote_path(nas_root, title, row["year"])
+        if path.exists() and path != dest_path and str(path) not in seen:
+            seen.add(str(path))
+            candidates.append(path)
+    return candidates
+
+
+def _build_movie_remote_path(nas_root: str, title: str, year: Any) -> Path:
+    safe_title = _sanitize_name(title)
+    title_year = f"{safe_title} ({year})" if year else safe_title
+    return Path(nas_root) / "Movies" / title_year / f"{title_year}.mkv"
+
+
+def _sanitize_name(value: str) -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*]', "", str(value or "")).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned[:180] if len(cleaned) > 180 else cleaned
+
+
+def _remove_empty_parent_dir(path: Path) -> None:
+    try:
+        if path.exists() and path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+    except OSError:
+        return
+
+
+def _stop_job_processes(job_id: str) -> list[int]:
+    current_pid = os.getpid()
+    script = (
+        "$procs = Get-CimInstance Win32_Process | "
+        f"Where-Object {{$_.CommandLine -like '*{job_id}*' -and $_.ProcessId -ne {current_pid} -and $_.Name -ne 'powershell.exe'}} | "
+        "Select-Object ProcessId | ConvertTo-Json -Compress"
+    )
+    probe = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    payload = (probe.stdout or "").strip()
+    if not payload:
+        return []
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError:
+        return []
+    rows = parsed if isinstance(parsed, list) else [parsed]
+    pids = [int(row["ProcessId"]) for row in rows if isinstance(row, dict) and row.get("ProcessId") is not None]
+    for pid in pids:
+        subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", f"Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    return pids
