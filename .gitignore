@@ -5,6 +5,7 @@ __pycache__/
 node_modules/
 frontend/dist/
 frontend/src-tauri/target/
+frontend/src-tauri/target-*/
 
 .env
 .env.*
