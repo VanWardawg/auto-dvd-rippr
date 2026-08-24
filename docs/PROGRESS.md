@@ -7,9 +7,9 @@ so any session can pick up mid-stream.
 
 ---
 
-## In flight
+## Recently completed
 
-Branch: `feat/hardening-and-rip-improvements`
+Branch: `feat/hardening-and-rip-improvements` (not yet merged to `main`)
 
 ### Track 1 — Repo hygiene and packaging  ✅ complete
 
@@ -40,6 +40,12 @@ Branch: `feat/hardening-and-rip-improvements`
 
 ## Not started
 
+- **Content Security Policy.** `tauri.conf.json` sets `"csp": null`. A
+  restrictive policy is easy to write but needs a packaged-app run to confirm
+  it does not blank the window, so it was left alone rather than shipped
+  unverified. Low priority: the webview loads only bundled assets and makes no
+  network requests of its own (TMDB calls happen in Python).
+
 - **Sidecar architecture.** Replace process-per-action with one long-lived
   backend speaking JSON-RPC over stdio, and push progress instead of polling.
   This is the biggest structural improvement available and unblocks
@@ -58,4 +64,25 @@ Branch: `feat/hardening-and-rip-improvements`
 
 ## Done
 
-_(nothing yet -- entries move here as tracks complete)_
+### 2026-08-23 — Tracks 1-3 (branch `feat/hardening-and-rip-improvements`)
+
+- **Repo hygiene:** untracked `app/config.json` and broadened `.gitignore` so a
+  TMDB key cannot leak; removed scaffolding leftovers; added
+  `requirements.txt` / `requirements-dev.txt` with a pinned PyInstaller; added
+  the root `README.md`, `CLAUDE.md`, and this file; CI now runs the tests and
+  releases are gated on them.
+- **Bundle and versioning:** deleted the legacy tkinter GUI and excluded Tcl/Tk
+  (30 MB -> 21 MB); made the backend build resolve a Python that actually has
+  PyInstaller (setup-python does not register with the `py` launcher); added
+  `set-version.mjs` so the git tag is the single source of the version.
+- **SQLite:** WAL + 30s busy timeout + schema DDL gated behind
+  `PRAGMA user_version`, so the UI's 3s poll no longer opens a write
+  transaction per tick.
+- **Progress:** new `job_progress` table and `progress.py` module replace
+  free-text log lines and regex parsing; `last_advance_at` drives stall
+  detection.
+- **Ripping:** title selection via the new `makemkv.py` (skips trailers,
+  logos, playlist duplicates, and "play all" tracks), a configurable Blu-ray
+  scan timeout, real MakeMKV robot progress parsing, and optional auto-eject.
+
+Test suite grew from 9 to 31 cases.
