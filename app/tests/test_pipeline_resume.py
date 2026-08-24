@@ -351,5 +351,147 @@ class NasPreflightTests(unittest.TestCase):
         self.assertEqual(warnings, [])
 
 
+class DiscReleaseTests(unittest.TestCase):
+    """
+    The disc must be released the moment nothing needs it, and never before.
+
+    This is what makes an unattended session work: with the tray open, swapping
+    in the next disc starts the next job without anyone touching the UI. But
+    ejecting too early breaks DVD menu analysis, which reads VIDEO_TS straight
+    off the drive.
+    """
+
+    def _config(self, root: Path, **kw):
+        cfg = build_config(root)
+        return cfg.__class__(**{**cfg.__dict__, **kw})
+
+    def test_ripping_alone_does_not_eject(self) -> None:
+        """Menu analysis still needs the disc when the rip finishes."""
+        import autorippr.rip as rip
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = self._config(root, eject_after_rip=True)
+            conn = open_db(cfg.db_path)
+            try:
+                job_id = create_job(conn, disc_label="D", media_type="movie", optical_drive="E:")
+                transition_job(conn, job_id, "ripping")
+                conn.commit()
+                with patch.object(rip, "eject_drive", return_value=True) as eject:
+                    rip.execute_rip_job(conn, cfg, job_id, mock=True)
+                eject.assert_not_called()
+            finally:
+                conn.close()
+
+    def test_disabled_setting_never_ejects(self) -> None:
+        import autorippr.pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = self._config(root, eject_after_rip=False)
+            conn = open_db(cfg.db_path)
+            try:
+                job_id = create_job(conn, disc_label="D", media_type="movie", optical_drive="E:")
+                conn.commit()
+                with patch.object(pipeline, "eject_drive", return_value=True) as eject:
+                    released = pipeline.release_disc(conn, cfg, job_id, reason="test")
+                self.assertFalse(released)
+                eject.assert_not_called()
+            finally:
+                conn.close()
+
+    def test_release_uses_the_jobs_own_drive(self) -> None:
+        import autorippr.pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = self._config(root, eject_after_rip=True)
+            conn = open_db(cfg.db_path)
+            try:
+                job_id = create_job(conn, disc_label="D", media_type="movie", optical_drive="F:")
+                conn.commit()
+                with patch.object(pipeline, "eject_drive", return_value=True) as eject:
+                    pipeline.release_disc(conn, cfg, job_id, reason="identified")
+                eject.assert_called_once_with("F:")
+                messages = [
+                    r["message"]
+                    for r in conn.execute(
+                        "SELECT message FROM job_logs WHERE job_id = ?", (job_id,)
+                    ).fetchall()
+                ]
+                self.assertTrue(any("Ejected F:" in m for m in messages))
+            finally:
+                conn.close()
+
+    def test_failure_to_eject_is_only_a_warning(self) -> None:
+        """A stuck tray must never fail a completed rip."""
+        import autorippr.pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = self._config(root, eject_after_rip=True)
+            conn = open_db(cfg.db_path)
+            try:
+                job_id = create_job(conn, disc_label="D", media_type="movie", optical_drive="E:")
+                conn.commit()
+                with patch.object(pipeline, "eject_drive", return_value=False):
+                    released = pipeline.release_disc(conn, cfg, job_id, reason="identified")
+                self.assertFalse(released)
+                levels = [
+                    r["level"]
+                    for r in conn.execute(
+                        "SELECT level FROM job_logs WHERE job_id = ?", (job_id,)
+                    ).fetchall()
+                ]
+                self.assertIn("WARNING", levels)
+                self.assertNotIn("ERROR", levels)
+            finally:
+                conn.close()
+
+    def test_tv_caches_menu_artifacts_before_releasing(self) -> None:
+        """Mapping reads cached artifacts, so they must exist before the eject."""
+        import autorippr.pipeline as pipeline
+
+        order = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = self._config(root, eject_after_rip=True)
+            conn = open_db(cfg.db_path)
+            try:
+                job_id = create_job(conn, disc_label="D", media_type="tv", optical_drive="E:")
+                transition_job(conn, job_id, "ripping")
+                conn.commit()
+
+                with patch.object(pipeline, "execute_rip_job"),                      patch.object(pipeline, "recover_completed_rip", return_value=None),                      patch.object(pipeline, "_warn_if_nas_unreachable"),                      patch.object(pipeline, "analyze_dvd_menu", side_effect=lambda *a, **k: order.append("analyze")),                      patch.object(pipeline, "eject_drive", side_effect=lambda *a: order.append("eject") or True),                      patch.object(pipeline, "_advance_after_rip", return_value="identifying"):
+                    pipeline._execute_rip_and_advance(conn, cfg, job_id, mock_rip=False)
+
+                self.assertEqual(order, ["analyze", "eject"])
+            finally:
+                conn.close()
+
+    def test_menu_capture_failure_does_not_stop_the_pipeline(self) -> None:
+        import autorippr.pipeline as pipeline
+        from autorippr.mapper import MappingError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = self._config(root, eject_after_rip=True)
+            conn = open_db(cfg.db_path)
+            try:
+                job_id = create_job(conn, disc_label="D", media_type="tv", optical_drive="E:")
+                conn.commit()
+                with patch.object(pipeline, "analyze_dvd_menu", side_effect=MappingError("no menu")):
+                    pipeline._capture_menu_artifacts_before_release(conn, cfg, job_id)
+                messages = [
+                    r["message"]
+                    for r in conn.execute(
+                        "SELECT message FROM job_logs WHERE job_id = ?", (job_id,)
+                    ).fetchall()
+                ]
+                self.assertTrue(any("Could not cache DVD menu" in m for m in messages))
+            finally:
+                conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

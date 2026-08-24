@@ -608,17 +608,27 @@ export default function App() {
             continue;
           }
 
+          // Only a job that is still in flight should suppress a new one.
+          // Matching finished jobs too meant that re-inserting a disc you had
+          // already ripped did nothing at all, reported as "already has an
+          // active job" -- a silent stall, which is the worst outcome when
+          // nobody is watching the screen.
           const matchingExistingJob = jobsRef.current.find(
             (job) =>
               job.disc_label === disc.volume_label &&
-              (job.optical_drive ?? "").toUpperCase() === disc.drive.toUpperCase(),
+              (job.optical_drive ?? "").toUpperCase() === disc.drive.toUpperCase() &&
+              job.status !== "done" &&
+              job.status !== "error",
           );
           if (matchingExistingJob) {
             lastAutoStartedDiscRef.current[card.id] = signature;
             setDriveCards((cards) =>
               cards.map((entry) =>
                 entry.id === card.id
-                  ? { ...entry, continuousStatus: `Disc already has an active job: ${disc.volume_label}` }
+                  ? {
+                      ...entry,
+                      continuousStatus: `Disc already has a job in progress (${matchingExistingJob.status}): ${disc.volume_label}`,
+                    }
                   : entry,
               ),
             );
@@ -1864,7 +1874,7 @@ export default function App() {
                         </small>
                       </label>
                       <label>
-                        <span>Eject when a rip finishes</span>
+                        <span>Eject when the disc is done with</span>
                         <select
                           value={configDraft.eject_after_rip ?? "false"}
                           onChange={(e) => setConfigDraft((value) => ({ ...value, eject_after_rip: e.target.value }))}
@@ -1872,7 +1882,11 @@ export default function App() {
                           <option value="false">Leave the disc in the drive</option>
                           <option value="true">Eject automatically</option>
                         </select>
-                        <small>Useful with continuous mode when working through a stack of discs.</small>
+                        <small>
+                          Ejects once identification is finished — including when a job stops to ask you
+                          something — so the drive is free even while a job waits. With continuous mode on,
+                          dropping the next disc into the open tray starts it without touching the app.
+                        </small>
                       </label>
                       <label>
                         <span>Verify NAS copies</span>

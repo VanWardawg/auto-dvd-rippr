@@ -346,22 +346,6 @@ def execute_rip_job(
     clear_progress(conn, job_id)
     conn.commit()
 
-    if not mock and cfg.eject_after_rip:
-        ejected = eject_drive(optical_drive)
-        append_job_log(
-            conn=conn,
-            job_id=job_id,
-            level="INFO" if ejected else "WARNING",
-            message=(
-                f"Ejected {optical_drive or 'optical drive'} after rip."
-                if ejected
-                else f"Could not eject {optical_drive or 'optical drive'} after rip."
-            ),
-            from_status=None,
-            to_status=None,
-        )
-        conn.commit()
-
     return {
         "job_id": job_id,
         "mock": mock,

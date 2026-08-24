@@ -96,8 +96,11 @@ class AppConfig:
     # Blu-ray playlist scans routinely take 1-3 minutes; the old hard-coded
     # 45s cap timed them out and discarded the title metadata.
     disc_scan_timeout_seconds: int = 300
-    # Eject the disc when a rip finishes, so a migration session becomes
-    # "swap disc, repeat" instead of "go click something".
+    # Eject as soon as nothing needs the disc any more -- after identification,
+    # including when the job pauses for review. Ripping alone is not enough:
+    # DVD menu analysis reads VIDEO_TS straight off the drive. The name is kept
+    # for config compatibility. With continuous mode this turns a session into
+    # "drop the next disc in the open tray" with no UI interaction at all.
     eject_after_rip: bool = False
     # Read each transferred file back off the NAS and compare it to the hash
     # computed while copying. This is genuine end-to-end verification, but it

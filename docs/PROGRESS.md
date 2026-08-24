@@ -52,14 +52,6 @@ target the waiting, not the compute.
 
 ## Next up (found by running the app on real discs)
 
-- **Free the drive during review.** A job awaiting review keeps its disc in the
-  drive, so continuous mode cannot start the next one: 17 min of ripping
-  occupies the drive for ~52 min. Ejecting after the rip is roughly a 3x
-  throughput gain. Blocked on one thing: `_discover_dvd_menu_vobs` reads
-  VIDEO_TS off the optical drive, and `eject_after_rip` currently fires before
-  identify -- so enabling it today silently disables the menu-analysis fallback
-  that succeeds 17% of the time. Fix by capturing menu artifacts during the rip
-  stage, then ejecting.
 - **Strip disc-junk tokens from labels.** `PRINCESS_BRIDE_CE`, `EVERAFTER169`
   (16:9), `PAW_PATROL_NA`, `THESECRETLIFEOFWALTERMITTY` (no spaces).
 - **Batch review queue** so several discs can be cleared in one sitting.
@@ -176,3 +168,26 @@ pick would have written a mis-named file to the NAS.
 That last case needed a new guard: when several candidates share the leader's
 title, runtime only confers confidence if the match is near-exact *and* clearly
 better than every rival. Test suite grew from 65 to 91 cases.
+
+### 2026-08-24 — hands-off disc swapping
+
+Targets the 107 hours of waiting rather than the compute. The drive is now
+released the moment nothing needs the disc, which for a movie is after
+identification resolves -- **including when the job pauses for review**, which
+is exactly when the drive would otherwise be held for 35 minutes or overnight.
+
+- `eject_after_rip` used to fire at the end of the rip, which was both too
+  early (DVD menu analysis reads VIDEO_TS off the drive, so enabling it
+  silently disabled a fallback that succeeds 17% of the time) and too late to
+  help (the job then held the drive through review anyway). Ejection moved
+  into the pipeline, which knows when the disc is genuinely finished with.
+- TV identifies before ripping, so its menu artifacts are cached right after
+  the rip and the drive is released before mapping, which reads them from
+  staging rather than the disc.
+- Continuous mode no longer refuses to auto-start when a *finished* job shares
+  the disc label. It matched jobs in any state, so re-inserting an
+  already-ripped disc did nothing and reported "already has an active job" --
+  a silent stall, which is the worst failure when nobody is at the screen.
+
+Together: open tray, drop the next disc in, it starts. No UI interaction.
+Test suite grew from 91 to 97 cases.

@@ -6,7 +6,7 @@ from typing import Any
 from .config import AppConfig
 from .mapper import MappingError, analyze_dvd_menu, map_job_episodes
 from .naming import NamingError, finalize_job_outputs
-from .rip import RipError, execute_rip_job, recover_completed_rip
+from .rip import RipError, eject_drive, execute_rip_job, recover_completed_rip
 from .splitter import SplitError, execute_splits, plan_splits_for_job
 from .state import InvalidTransitionError, append_job_log, get_job, transition_job
 from .tmdb import TmdbError, identify_job_with_tmdb
@@ -31,6 +31,65 @@ def resume_incomplete_jobs(conn, cfg: AppConfig, mock_rip: bool = False) -> list
         except Exception as exc:
             results.append({"job_id": job_id, "ok": False, "error": str(exc)})
     return results
+
+
+def release_disc(conn, cfg: AppConfig, job_id: str, *, reason: str) -> bool:
+    """
+    Eject the disc once nothing else needs it.
+
+    Ejecting is what makes an unattended session work: the drive is otherwise
+    held for as long as the job takes, and a job paused for review holds it
+    indefinitely -- 35 minutes at the median, and much longer overnight. With
+    the tray open, swapping in the next disc is enough to start the next job,
+    with no need to touch the UI at all.
+
+    The disc is *not* finished with when the rip ends: DVD menu analysis reads
+    VIDEO_TS straight off the drive. This is called only once that has run or
+    been ruled out.
+    """
+    if not cfg.eject_after_rip:
+        return False
+
+    job = get_job(conn, job_id) or {}
+    drive = job.get("optical_drive")
+    ejected = eject_drive(drive)
+    append_job_log(
+        conn,
+        job_id,
+        "INFO" if ejected else "WARNING",
+        (
+            f"Ejected {drive or 'optical drive'} ({reason}); ready for the next disc."
+            if ejected
+            else f"Could not eject {drive or 'optical drive'} ({reason})."
+        ),
+        None,
+        None,
+    )
+    conn.commit()
+    return ejected
+
+
+def _capture_menu_artifacts_before_release(conn, cfg: AppConfig, job_id: str) -> None:
+    """
+    Cache whatever the DVD menu can tell us while the disc is still readable.
+
+    Episode mapping reads these artifacts from staging rather than the disc, so
+    capturing them here is what allows the drive to be released before mapping
+    runs. Best effort: a disc with no usable menu is normal, and must not stop
+    the pipeline.
+    """
+    try:
+        analyze_dvd_menu(conn, cfg, job_id)
+    except (MappingError, OSError) as exc:
+        append_job_log(
+            conn,
+            job_id,
+            "WARNING",
+            f"Could not cache DVD menu artifacts before ejecting: {exc}",
+            None,
+            None,
+        )
+        conn.commit()
 
 
 def _resume_errored_job(conn, job) -> str:
@@ -164,8 +223,12 @@ def run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = Fal
             has_rip_titles = _job_has_rip_titles(conn, job_id)
             if str(job["media_type"] or "tv") == "movie" and movie_mode != "single" and len(selected_movie_slots) >= required_movie_slots:
                 status = _advance_after_identify(conn, job_id, "movie", has_rip_titles=has_rip_titles)
+                if has_rip_titles:
+                    release_disc(conn, cfg, job_id, reason="identified")
             elif manual_selected and selected_media:
                 status = _advance_after_identify(conn, job_id, str(selected_media["media_type"] or "tv"), has_rip_titles=has_rip_titles)
+                if has_rip_titles:
+                    release_disc(conn, cfg, job_id, reason="identified")
             else:
                 ident = identify_job_with_tmdb(conn, cfg, job_id)
                 if ident["needs_review"] and _should_retry_identify_with_menu_analysis(cfg, job_id, str(job["media_type"] or "tv")):
@@ -193,6 +256,11 @@ def run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = Fal
                     else:
                         ident = identify_job_with_tmdb(conn, cfg, job_id)
                 if ident["needs_review"]:
+                    # Identification has done all it can; the disc is no longer
+                    # needed, and this job is about to sit waiting for a human.
+                    # Free the drive so the next disc can go in.
+                    if has_rip_titles:
+                        release_disc(conn, cfg, job_id, reason="waiting for review")
                     return {"status": "identifying", "needs_review": True, "identify": ident}
                 status = _advance_after_identify(
                     conn,
@@ -200,6 +268,8 @@ def run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = Fal
                     str(ident["selected"]["media_type"] if ident.get("selected") else job["media_type"] or "tv"),
                     has_rip_titles=has_rip_titles,
                 )
+                if has_rip_titles:
+                    release_disc(conn, cfg, job_id, reason="identified")
 
         if status == "ripping":
             status = _execute_rip_and_advance(conn, cfg, job_id, mock_rip=mock_rip)
@@ -401,6 +471,13 @@ def _execute_rip_and_advance(conn, cfg: AppConfig, job_id: str, *, mock_rip: boo
             optical_drive=(job or {}).get("optical_drive"),
             mock=mock_rip,
         )
+        if not mock_rip and cfg.eject_after_rip:
+            job = get_job(conn, job_id) or {}
+            if str(job.get("media_type") or "tv") == "tv":
+                # TV identifies before ripping, so the only remaining use for
+                # the disc is menu analysis. Cache it now, then let go.
+                _capture_menu_artifacts_before_release(conn, cfg, job_id)
+                release_disc(conn, cfg, job_id, reason="rip complete")
     return _advance_after_rip(conn, job_id)
 
 
