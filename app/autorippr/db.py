@@ -6,6 +6,7 @@ SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
     disc_label TEXT NOT NULL DEFAULT '',
+    optical_drive TEXT,
     media_type TEXT NOT NULL DEFAULT 'tv',
     movie_mode TEXT NOT NULL DEFAULT 'single',
     disc_scope TEXT,
@@ -186,6 +187,8 @@ def _apply_best_effort_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE jobs ADD COLUMN disc_scope TEXT")
     if "movie_mode" not in columns:
         conn.execute("ALTER TABLE jobs ADD COLUMN movie_mode TEXT NOT NULL DEFAULT 'single'")
+    if "optical_drive" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN optical_drive TEXT")
     if "season_number" not in columns:
         conn.execute("ALTER TABLE jobs ADD COLUMN season_number INTEGER")
     if "episode_range_start" not in columns:

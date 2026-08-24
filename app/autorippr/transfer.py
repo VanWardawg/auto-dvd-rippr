@@ -51,7 +51,12 @@ def transfer_job_outputs(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
         relative_dest = _build_relative_destination(local_path, finalize_root, str(job["media_type"] or "movie"))
         nas_final = Path(cfg.nas_root) / relative_dest
         temp_dest = nas_final.with_suffix(nas_final.suffix + ".part")
-        nas_final.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            nas_final.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise TransferError(
+                f"NAS destination is unavailable: {nas_final.parent} ({exc})"
+            ) from exc
         recorded_nas_path = str(row["nas_path"] or "").strip()
         if nas_final.exists() and recorded_nas_path != str(nas_final):
             message = f"destination_exists:{nas_final}"

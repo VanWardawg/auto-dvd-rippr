@@ -4,12 +4,12 @@ from typing import Any
 
 from .config import AppConfig
 from .mapper import MappingError, analyze_dvd_menu, map_job_episodes
-from .naming import finalize_job_outputs
-from .rip import execute_rip_job, recover_completed_rip
-from .splitter import execute_splits, plan_splits_for_job
-from .state import append_job_log, get_job, transition_job
-from .tmdb import identify_job_with_tmdb
-from .transfer import transfer_job_outputs
+from .naming import NamingError, finalize_job_outputs
+from .rip import RipError, execute_rip_job, recover_completed_rip
+from .splitter import SplitError, execute_splits, plan_splits_for_job
+from .state import InvalidTransitionError, append_job_log, get_job, transition_job
+from .tmdb import TmdbError, identify_job_with_tmdb
+from .transfer import TransferError, transfer_job_outputs
 
 
 def resume_incomplete_jobs(conn, cfg: AppConfig, mock_rip: bool = False) -> list[dict[str, Any]]:
@@ -38,142 +38,148 @@ def run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = Fal
         raise RuntimeError(f"Job not found: {job_id}")
     status = str(job["status"])
 
-    if status == "queued":
-        if str(job["media_type"] or "tv") == "tv":
-            transition_job(conn, job_id, "identifying")
-            status = "identifying"
-        else:
-            transition_job(conn, job_id, "ripping")
+    try:
+        if status == "queued":
+            if str(job["media_type"] or "tv") == "tv":
+                transition_job(conn, job_id, "identifying")
+                status = "identifying"
+            else:
+                transition_job(conn, job_id, "ripping")
+                status = _execute_rip_and_advance(conn, cfg, job_id, mock_rip=mock_rip)
+
+        if status == "ripping":
             status = _execute_rip_and_advance(conn, cfg, job_id, mock_rip=mock_rip)
 
-    if status == "ripping":
-        status = _execute_rip_and_advance(conn, cfg, job_id, mock_rip=mock_rip)
-
-    if status == "identifying":
-        movie_mode = str(job.get("movie_mode") or "single")
-        required_movie_slots = _required_movie_slots(movie_mode)
-        manual_selected = conn.execute(
-            """
-            SELECT tmdb_id, media_type
-            FROM tmdb_candidates
-            WHERE job_id = ? AND selected = 1 AND manual_override = 1
-            LIMIT 1
-            """,
-            (job_id,),
-        ).fetchone()
-        selected_movie_slots = conn.execute(
-            """
-            SELECT slot_index
-            FROM job_selected_movies
-            WHERE job_id = ?
-            ORDER BY slot_index ASC
-            """,
-            (job_id,),
-        ).fetchall()
-        selected_media = conn.execute(
-            """
-            SELECT tmdb_id, media_type
-            FROM job_selected_media
-            WHERE job_id = ?
-            LIMIT 1
-            """,
-            (job_id,),
-        ).fetchone()
-        has_rip_titles = _job_has_rip_titles(conn, job_id)
-        if str(job["media_type"] or "tv") == "movie" and movie_mode != "single" and len(selected_movie_slots) >= required_movie_slots:
-            status = _advance_after_identify(conn, job_id, "movie", has_rip_titles=has_rip_titles)
-        elif manual_selected and selected_media:
-            status = _advance_after_identify(conn, job_id, str(selected_media["media_type"] or "tv"), has_rip_titles=has_rip_titles)
-        else:
-            ident = identify_job_with_tmdb(conn, cfg, job_id)
-            if ident["needs_review"] and _should_retry_identify_with_menu_analysis(cfg, job_id, str(job["media_type"] or "tv")):
-                append_job_log(
-                    conn,
-                    job_id,
-                    "INFO",
-                    "TMDB identify needs review; attempting DVD menu analysis and retry before pausing.",
-                    None,
-                    None,
-                )
-                conn.commit()
-                try:
-                    analyze_dvd_menu(conn, cfg, job_id)
-                except (MappingError, OSError) as exc:
+        if status == "identifying":
+            movie_mode = str(job.get("movie_mode") or "single")
+            required_movie_slots = _required_movie_slots(movie_mode)
+            manual_selected = conn.execute(
+                """
+                SELECT tmdb_id, media_type
+                FROM tmdb_candidates
+                WHERE job_id = ? AND selected = 1 AND manual_override = 1
+                LIMIT 1
+                """,
+                (job_id,),
+            ).fetchone()
+            selected_movie_slots = conn.execute(
+                """
+                SELECT slot_index
+                FROM job_selected_movies
+                WHERE job_id = ?
+                ORDER BY slot_index ASC
+                """,
+                (job_id,),
+            ).fetchall()
+            selected_media = conn.execute(
+                """
+                SELECT tmdb_id, media_type
+                FROM job_selected_media
+                WHERE job_id = ?
+                LIMIT 1
+                """,
+                (job_id,),
+            ).fetchone()
+            has_rip_titles = _job_has_rip_titles(conn, job_id)
+            if str(job["media_type"] or "tv") == "movie" and movie_mode != "single" and len(selected_movie_slots) >= required_movie_slots:
+                status = _advance_after_identify(conn, job_id, "movie", has_rip_titles=has_rip_titles)
+            elif manual_selected and selected_media:
+                status = _advance_after_identify(conn, job_id, str(selected_media["media_type"] or "tv"), has_rip_titles=has_rip_titles)
+            else:
+                ident = identify_job_with_tmdb(conn, cfg, job_id)
+                if ident["needs_review"] and _should_retry_identify_with_menu_analysis(cfg, job_id, str(job["media_type"] or "tv")):
                     append_job_log(
                         conn,
                         job_id,
-                        "WARNING",
-                        f"DVD menu analysis retry failed during identify fallback: {exc}",
+                        "INFO",
+                        "TMDB identify needs review; attempting DVD menu analysis and retry before pausing.",
                         None,
                         None,
                     )
                     conn.commit()
-                else:
-                    ident = identify_job_with_tmdb(conn, cfg, job_id)
-            if ident["needs_review"]:
-                return {"status": "identifying", "needs_review": True, "identify": ident}
-            status = _advance_after_identify(
-                conn,
-                job_id,
-                str(ident["selected"]["media_type"] if ident.get("selected") else job["media_type"] or "tv"),
-                has_rip_titles=has_rip_titles,
-            )
+                    try:
+                        analyze_dvd_menu(conn, cfg, job_id)
+                    except (MappingError, OSError) as exc:
+                        append_job_log(
+                            conn,
+                            job_id,
+                            "WARNING",
+                            f"DVD menu analysis retry failed during identify fallback: {exc}",
+                            None,
+                            None,
+                        )
+                        conn.commit()
+                    else:
+                        ident = identify_job_with_tmdb(conn, cfg, job_id)
+                if ident["needs_review"]:
+                    return {"status": "identifying", "needs_review": True, "identify": ident}
+                status = _advance_after_identify(
+                    conn,
+                    job_id,
+                    str(ident["selected"]["media_type"] if ident.get("selected") else job["media_type"] or "tv"),
+                    has_rip_titles=has_rip_titles,
+                )
 
-    if status == "ripping":
-        status = _execute_rip_and_advance(conn, cfg, job_id, mock_rip=mock_rip)
+        if status == "ripping":
+            status = _execute_rip_and_advance(conn, cfg, job_id, mock_rip=mock_rip)
 
-    if status == "mapping":
-        selected_media = conn.execute(
-            """
-            SELECT media_type
-            FROM job_selected_media
-            WHERE job_id = ?
-            LIMIT 1
-            """,
-            (job_id,),
-        ).fetchone()
-        if selected_media and str(selected_media["media_type"] or "tv") == "movie":
-            status = _advance_movie_past_mapping(conn, job_id)
-        else:
-            existing_mapping_state = _resume_existing_mappings_if_ready(conn, job_id)
-            if existing_mapping_state is not None:
-                status = existing_mapping_state
+        if status == "mapping":
+            selected_media = conn.execute(
+                """
+                SELECT media_type
+                FROM job_selected_media
+                WHERE job_id = ?
+                LIMIT 1
+                """,
+                (job_id,),
+            ).fetchone()
+            if selected_media and str(selected_media["media_type"] or "tv") == "movie":
+                status = _advance_movie_past_mapping(conn, job_id)
             else:
-                mapped = map_job_episodes(conn, cfg, job_id)
-                if mapped["needs_review"]:
-                    return {"status": "mapping", "needs_review": True, "mapping": mapped}
-                if any(m.get("needs_split") for m in mapped["mappings"]):
-                    transition_job(conn, job_id, "splitting")
-                    status = "splitting"
+                existing_mapping_state = _resume_existing_mappings_if_ready(conn, job_id)
+                if existing_mapping_state is not None:
+                    status = existing_mapping_state
                 else:
-                    transition_job(conn, job_id, "renaming")
-                    status = "renaming"
+                    mapped = map_job_episodes(conn, cfg, job_id)
+                    if mapped["needs_review"]:
+                        return {"status": "mapping", "needs_review": True, "mapping": mapped}
+                    if any(m.get("needs_split") for m in mapped["mappings"]):
+                        transition_job(conn, job_id, "splitting")
+                        status = "splitting"
+                    else:
+                        transition_job(conn, job_id, "renaming")
+                        status = "renaming"
 
-    if status == "splitting":
-        plan_splits_for_job(conn, job_id)
-        execute_splits(conn, cfg, job_id)
-        split_errors = conn.execute(
-            "SELECT COUNT(*) AS c FROM split_plans WHERE job_id = ? AND status = 'error'",
-            (job_id,),
-        ).fetchone()["c"]
-        if split_errors:
-            return {"status": "splitting", "needs_review": True, "split_errors": int(split_errors)}
-        transition_job(conn, job_id, "renaming")
-        status = "renaming"
+        if status == "splitting":
+            plan_splits_for_job(conn, job_id)
+            execute_splits(conn, cfg, job_id)
+            split_errors = conn.execute(
+                "SELECT COUNT(*) AS c FROM split_plans WHERE job_id = ? AND status = 'error'",
+                (job_id,),
+            ).fetchone()["c"]
+            if split_errors:
+                return {"status": "splitting", "needs_review": True, "split_errors": int(split_errors)}
+            transition_job(conn, job_id, "renaming")
+            status = "renaming"
 
-    if status == "renaming":
-        finalize_job_outputs(conn, cfg, job_id)
-        transition_job(conn, job_id, "copying")
-        status = "copying"
+        if status == "renaming":
+            finalize_job_outputs(conn, cfg, job_id)
+            transition_job(conn, job_id, "copying")
+            status = "copying"
 
-    if status == "copying":
-        transfer = transfer_job_outputs(conn, cfg, job_id)
-        if transfer["errors"]:
-            return {"status": "copying", "needs_review": True, "transfer": transfer}
-        transition_job(conn, job_id, "done")
-        status = "done"
+        if status == "copying":
+            transfer = transfer_job_outputs(conn, cfg, job_id)
+            if transfer["errors"]:
+                first_error = str(transfer["errors"][0].get("error") or "copy_failed")
+                _transition_job_to_error_if_active(conn, job_id, f"NAS transfer failed: {first_error}")
+                return {"status": "error", "needs_review": True, "transfer": transfer}
+            transition_job(conn, job_id, "done")
+            status = "done"
 
-    return {"status": status}
+        return {"status": status}
+    except (RipError, TmdbError, MappingError, SplitError, NamingError, TransferError) as exc:
+        _transition_job_to_error_if_active(conn, job_id, str(exc))
+        raise
 
 
 def _should_retry_identify_with_menu_analysis(cfg: AppConfig, job_id: str, media_type: str) -> bool:
@@ -254,7 +260,14 @@ def _job_has_rip_titles(conn, job_id: str) -> bool:
 def _execute_rip_and_advance(conn, cfg: AppConfig, job_id: str, *, mock_rip: bool) -> str:
     recovered = recover_completed_rip(conn, cfg, job_id)
     if recovered is None:
-        execute_rip_job(conn, cfg, job_id, mock=mock_rip)
+        job = get_job(conn, job_id)
+        execute_rip_job(
+            conn,
+            cfg,
+            job_id,
+            optical_drive=(job or {}).get("optical_drive"),
+            mock=mock_rip,
+        )
     return _advance_after_rip(conn, job_id)
 
 
@@ -271,6 +284,31 @@ def _advance_after_rip(conn, job_id: str) -> str:
     next_status = "mapping" if selected_media and str(selected_media["media_type"] or "tv") == "tv" else "identifying"
     transition_job(conn, job_id, next_status)
     return next_status
+
+
+def _transition_job_to_error_if_active(conn, job_id: str, message: str) -> None:
+    current = get_job(conn, job_id)
+    if not current:
+        return
+    current_status = str(current.get("status") or "")
+    if current_status == "error":
+        return
+    try:
+        transition_job(conn, job_id, "error", message)
+    except InvalidTransitionError:
+        conn.execute(
+            "UPDATE jobs SET status = 'error', current_stage = 'error', updated_at = datetime('now'), error_message = ? WHERE id = ?",
+            (message, job_id),
+        )
+        append_job_log(
+            conn,
+            job_id,
+            "ERROR",
+            f"Forced transition {current_status} -> error",
+            current_status,
+            "error",
+        )
+        conn.commit()
 
 
 def _resume_existing_mappings_if_ready(conn, job_id: str) -> str | None:

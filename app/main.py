@@ -1,6 +1,7 @@
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -18,7 +19,7 @@ from autorippr.state import (
     transition_job,
     update_job_disc_profile,
 )
-from autorippr.rip import RipError, discover_optical_drives, execute_rip_job
+from autorippr.rip import RipError, discover_optical_drives, execute_rip_job, get_makemkv_status
 from autorippr.tmdb import TmdbError, fetch_tmdb_tv_episodes, identify_job_with_tmdb, search_job_with_tmdb_query, select_tmdb_candidate
 from autorippr.mapper import (
     MappingError,
@@ -284,6 +285,33 @@ def _build_review_state(
     rip_reason = None
     rip_details: list[str] = []
     makemkv_log = _read_text_file(Path(cfg.staging_root) / "jobs" / str(job["id"]) / "logs" / "makemkv.log")
+    latest_attempt_log = next(
+        (
+            log for log in reversed(logs)
+            if str(log.get("message") or "").startswith("Starting MakeMKV disc-info scan.")
+            or str(log.get("message") or "").startswith("Starting MakeMKV rip")
+            or "Removed " in str(log.get("message") or "") and "stale rip output file" in str(log.get("message") or "")
+        ),
+        None,
+    )
+    latest_attempt_ts = _parse_iso_timestamp(latest_attempt_log.get("timestamp")) if latest_attempt_log else None
+    latest_cleanup_log = next(
+        (
+            log for log in reversed(logs)
+            if "Removed " in str(log.get("message") or "") and "stale rip output file" in str(log.get("message") or "")
+        ),
+        None,
+    )
+    latest_cleanup_ts = _parse_iso_timestamp(latest_cleanup_log.get("timestamp")) if latest_cleanup_log else None
+
+    if (
+        "already exist. do you want to overwrite" in makemkv_log.lower()
+        and latest_cleanup_ts is None
+        and (latest_attempt_ts is None or latest_cleanup_ts is None or latest_cleanup_ts < latest_attempt_ts)
+    ):
+        rip_needed = True
+        rip_reason = "MakeMKV is blocked on an overwrite prompt because a stale rip output file already exists."
+        rip_details.append("Remove stale rip_output files or auto-clear them before retrying.")
     if "MEDIUM ERROR" in makemkv_log or "UNCORRECTABLE ERROR" in makemkv_log:
         rip_needed = True
         rip_reason = "MakeMKV reported a disc read error during rip."
@@ -301,6 +329,11 @@ def _build_review_state(
             log for log in logs
             if str(log.get("message") or "").startswith("Rip heartbeat:")
         ]
+        if latest_attempt_ts is not None:
+            rip_heartbeats = [
+                log for log in rip_heartbeats
+                if (_parse_iso_timestamp(log.get("timestamp")) or latest_attempt_ts) >= latest_attempt_ts
+            ]
         if rip_heartbeats:
             recent = rip_heartbeats[-4:]
             parsed = [
@@ -374,12 +407,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("validate-config", help="Validate configuration and exit")
+    sub.add_parser("makemkv-status", help="Check MakeMKV beta-key and build readiness")
 
     job = sub.add_parser("job", help="Job operations")
     job_sub = job.add_subparsers(dest="job_command")
 
     create = job_sub.add_parser("create", help="Create test job")
     create.add_argument("--disc-label", default="")
+    create.add_argument("--optical-drive", default=None)
     create.add_argument("--media-type", default="tv", choices=["tv", "movie"])
     create.add_argument("--movie-mode", default="single", choices=["single", "double_feature", "trilogy"])
     create.add_argument("--disc-scope", default=None, choices=["full_season", "partial_season", "special", "custom"])
@@ -439,6 +474,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     rip_run = rip_sub.add_parser("run", help="Run rip on a job")
     rip_run.add_argument("job_id")
+    rip_run.add_argument("--optical-drive", default=None)
     rip_run.add_argument("--disc-index", type=int, default=0)
     rip_run.add_argument("--mock", action="store_true")
     rip_run.set_defaults(_cmd="rip_run")
@@ -524,6 +560,12 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
+    if args.command == "makemkv-status":
+        raw = _load_json_file(Path(args.config)) or {}
+        makemkv_path = str(os.getenv("MAKEMKV_PATH") or raw.get("makemkv_path") or "").strip()
+        print(json.dumps(get_makemkv_status(makemkv_path), indent=2))
+        return 0
+
     try:
         cfg = load_config(args.config)
     except ConfigError as exc:
@@ -545,6 +587,7 @@ def main() -> int:
             job_id = create_job(
                 conn,
                 disc_label=args.disc_label,
+                optical_drive=args.optical_drive,
                 media_type=args.media_type,
                 movie_mode=args.movie_mode,
                 disc_scope=args.disc_scope,
@@ -828,6 +871,7 @@ def main() -> int:
                     conn=conn,
                     cfg=cfg,
                     job_id=args.job_id,
+                    optical_drive=args.optical_drive or job.get("optical_drive"),
                     disc_index=args.disc_index,
                     mock=args.mock,
                 )

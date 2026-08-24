@@ -12,6 +12,7 @@ export type JobStatus =
 export interface JobSummary {
   id: string;
   disc_label: string;
+  optical_drive?: string | null;
   media_type: "tv" | "movie";
   movie_mode?: "single" | "double_feature" | "trilogy";
   has_local_artifacts?: boolean;
@@ -177,10 +178,45 @@ export interface JobSnapshot {
 
 export interface StartJobRequest {
   discLabel: string;
+  opticalDrive?: string | null;
   mediaType: "tv" | "movie";
   movieMode?: "single" | "double_feature" | "trilogy";
   discScope?: "full_season" | "partial_season" | "special" | "custom";
   seasonNumber?: number | null;
   episodeRangeStart?: number | null;
   episodeRangeEnd?: number | null;
+}
+
+export interface RuntimeDependencyStatus {
+  path: string;
+  exists: boolean;
+}
+
+export interface RuntimeConfigValidation {
+  ok: boolean;
+  message: string;
+}
+
+export interface RuntimeMakeMkvStatus {
+  level: "ok" | "warning" | "error";
+  message: string;
+  details: string[];
+  buildVersion?: string | null;
+  canRip?: boolean | null;
+  betaKeyExpiresAt?: string | null;
+  daysUntilExpiry?: number | null;
+  checkedAt?: string | null;
+  sourceUrl?: string | null;
+}
+
+export interface RuntimeConfigState {
+  configPath: string;
+  config: Record<string, unknown>;
+  validation: RuntimeConfigValidation;
+  dependencies: {
+    makemkv: RuntimeDependencyStatus;
+    ffmpeg: RuntimeDependencyStatus;
+    ffprobe: RuntimeDependencyStatus;
+  };
+  makemkvStatus: RuntimeMakeMkvStatus;
 }

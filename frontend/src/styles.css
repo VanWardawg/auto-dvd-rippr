@@ -77,7 +77,8 @@ select {
 .sidebar,
 .panel,
 .start-card,
-.jobs-card {
+.jobs-card,
+.app-controls-card {
   background: rgba(255, 255, 255, 0.92);
   border: 1px solid #e2e8f0;
   border-radius: 20px;
@@ -114,8 +115,22 @@ select {
 }
 
 .start-card,
-.jobs-card {
+.jobs-card,
+.app-controls-card {
   padding: 1rem;
+}
+
+.app-controls-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin-top: 0.9rem;
+}
+
+.app-controls-note {
+  margin: 0.85rem 0 0;
+  color: #64748b;
+  font-size: 0.9rem;
 }
 
 .continuous-status {
@@ -144,6 +159,44 @@ select {
 .form-grid span {
   font-size: 0.85rem;
   color: #475569;
+}
+
+.drive-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.drive-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  padding: 1rem;
+  background: #f8fbff;
+}
+
+.drive-card-header,
+.drive-card-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.drive-card-header h3,
+.drive-card-header p {
+  margin: 0;
+}
+
+.drive-card-header p {
+  margin-top: 0.25rem;
+  color: #64748b;
+  font-size: 0.9rem;
+}
+
+.drive-card-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
 }
 
 .job-list {
@@ -239,6 +292,12 @@ select {
   display: flex;
   flex-wrap: wrap;
   gap: 0.6rem;
+}
+
+.settings-panel .section-header p {
+  margin: 0.25rem 0 0;
+  color: #64748b;
+  word-break: break-all;
 }
 
 .tabs {
@@ -692,6 +751,8 @@ select {
   .sidebar-header,
   .toolbar-actions,
   .section-header,
+  .drive-card-header,
+  .drive-card-actions,
   .review-banner,
   .hero-top,
   .hero-actions {

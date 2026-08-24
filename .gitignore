@@ -11,8 +11,10 @@ frontend/src-tauri/target-*/
 .env.*
 
 app/config.local.json
-frontend/src-tauri/resources/backend/
-frontend/src-tauri/resources/config/
+frontend/src-tauri/resources/backend/*
+!frontend/src-tauri/resources/backend/.gitkeep
+frontend/src-tauri/resources/config/*
+!frontend/src-tauri/resources/config/.gitkeep
 *.db
 *.log
 

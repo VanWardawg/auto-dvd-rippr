@@ -5,11 +5,19 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::Emitter;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StartJobRequest {
     disc_label: String,
+    optical_drive: Option<String>,
     media_type: String,
     movie_mode: Option<String>,
     disc_scope: Option<String>,
@@ -22,6 +30,7 @@ struct StartJobRequest {
 struct JobSummary {
     id: String,
     disc_label: String,
+    optical_drive: Option<String>,
     media_type: String,
     movie_mode: Option<String>,
     has_local_artifacts: Option<bool>,
@@ -43,6 +52,52 @@ struct DiscDrive {
     volume_label: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeConfigValidation {
+    ok: bool,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeDependencyStatus {
+    path: String,
+    exists: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeDependencies {
+    makemkv: RuntimeDependencyStatus,
+    ffmpeg: RuntimeDependencyStatus,
+    ffprobe: RuntimeDependencyStatus,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeMakeMkvStatus {
+    level: String,
+    message: String,
+    details: Vec<String>,
+    build_version: Option<String>,
+    can_rip: Option<bool>,
+    beta_key_expires_at: Option<String>,
+    days_until_expiry: Option<i64>,
+    checked_at: Option<String>,
+    source_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeConfigState {
+    config_path: String,
+    config: Value,
+    validation: RuntimeConfigValidation,
+    dependencies: RuntimeDependencies,
+    makemkv_status: RuntimeMakeMkvStatus,
+}
+
 #[derive(Debug)]
 struct RuntimePaths {
     repo_root: Option<PathBuf>,
@@ -54,9 +109,39 @@ struct RuntimePaths {
 
 fn main() {
     tauri::Builder::default()
+        .setup(|app| {
+            let settings = MenuItem::with_id(app, "open_settings", "Settings", true, None::<&str>)?;
+            let reload = MenuItem::with_id(app, "reload_config", "Reload Config", true, None::<&str>)?;
+            let separator = PredefinedMenuItem::separator(app)?;
+            let quit = MenuItem::with_id(app, "quit_app", "Quit", true, None::<&str>)?;
+            let file_menu = Submenu::with_items(app, "File", true, &[&settings, &reload, &separator, &quit])?;
+            let menubar = Menu::with_items(app, &[&file_menu])?;
+            app.set_menu(menubar)?;
+            Ok(())
+        })
+        .on_menu_event(|app, event| {
+            match event.id().as_ref() {
+                "open_settings" => {
+                    let _ = app.emit("app-menu", "settings");
+                }
+                "reload_config" => {
+                    let _ = app.emit("app-menu", "reload-config");
+                }
+                "quit_app" => {
+                    app.exit(0);
+                }
+                _ => {}
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             list_jobs,
+            get_runtime_config_state,
+            save_runtime_config,
+            autodetect_runtime_config,
+            browse_file_path,
+            browse_directory_path,
             job_snapshot,
+            list_disc_drives,
             detect_disc,
             start_pipeline,
             resume_pipeline,
@@ -95,24 +180,73 @@ fn list_jobs() -> Result<Vec<JobSummary>, String> {
 }
 
 #[tauri::command]
+fn get_runtime_config_state() -> Result<RuntimeConfigState, String> {
+    let runtime = resolve_runtime_paths()?;
+    let config = read_runtime_config_json(&runtime.config_path)?;
+    Ok(build_runtime_config_state(&runtime.config_path, &config))
+}
+
+#[tauri::command]
+fn save_runtime_config(config: Value) -> Result<RuntimeConfigState, String> {
+    let runtime = resolve_runtime_paths()?;
+    let object = config
+        .as_object()
+        .ok_or_else(|| "Config payload must be a JSON object".to_string())?;
+    let pretty = serde_json::to_string_pretty(object).map_err(|e| e.to_string())?;
+    fs::write(&runtime.config_path, pretty).map_err(|e| e.to_string())?;
+    let refreshed = read_runtime_config_json(&runtime.config_path)?;
+    Ok(build_runtime_config_state(&runtime.config_path, &refreshed))
+}
+
+#[tauri::command]
+fn autodetect_runtime_config() -> Result<RuntimeConfigState, String> {
+    let runtime = resolve_runtime_paths()?;
+    let mut config = read_runtime_config_json(&runtime.config_path)?;
+    let object = config
+        .as_object_mut()
+        .ok_or_else(|| "Runtime config must be a JSON object".to_string())?;
+
+    apply_detected_path(object, "makemkv_path", detect_makemkv_path());
+    apply_detected_path(object, "ffmpeg_path", detect_ffmpeg_path());
+    apply_detected_path(object, "ffprobe_path", detect_ffprobe_path());
+
+    let pretty = serde_json::to_string_pretty(object).map_err(|e| e.to_string())?;
+    fs::write(&runtime.config_path, pretty).map_err(|e| e.to_string())?;
+    let refreshed = read_runtime_config_json(&runtime.config_path)?;
+    Ok(build_runtime_config_state(&runtime.config_path, &refreshed))
+}
+
+#[tauri::command]
+fn browse_file_path(title: String, initial_path: Option<String>) -> Result<Option<String>, String> {
+    browse_windows_path(title, initial_path, false)
+}
+
+#[tauri::command]
+fn browse_directory_path(title: String, initial_path: Option<String>) -> Result<Option<String>, String> {
+    browse_windows_path(title, initial_path, true)
+}
+
+#[tauri::command]
 fn job_snapshot(job_id: String) -> Result<Value, String> {
     run_python_json(&["job", "snapshot", &job_id])
 }
 
 #[tauri::command]
-fn detect_disc() -> Result<Option<DiscDrive>, String> {
+fn list_disc_drives() -> Result<Vec<DiscDrive>, String> {
     let value = run_python_json(&["rip", "drives"])?;
     let drives = value
         .get("drives")
         .and_then(|v| v.as_array())
         .ok_or_else(|| "Invalid drives payload".to_string())?;
-    for drive in drives {
-        let parsed: DiscDrive = serde_json::from_value(drive.clone()).map_err(|e| e.to_string())?;
-        if parsed.has_media {
-            return Ok(Some(parsed));
-        }
-    }
-    Ok(None)
+    drives
+        .iter()
+        .map(|drive| serde_json::from_value::<DiscDrive>(drive.clone()).map_err(|e| e.to_string()))
+        .collect()
+}
+
+#[tauri::command]
+fn detect_disc(preferred_drive: Option<String>) -> Result<Option<DiscDrive>, String> {
+    detect_disc_for_drive(preferred_drive)
 }
 
 #[tauri::command]
@@ -128,6 +262,10 @@ fn start_pipeline(request: StartJobRequest) -> Result<String, String> {
     if let Some(scope) = request.disc_scope {
         create_args.push("--disc-scope".into());
         create_args.push(scope);
+    }
+    if let Some(optical_drive) = request.optical_drive {
+        create_args.push("--optical-drive".into());
+        create_args.push(optical_drive);
     }
     if let Some(movie_mode) = request.movie_mode {
         create_args.push("--movie-mode".into());
@@ -152,6 +290,25 @@ fn start_pipeline(request: StartJobRequest) -> Result<String, String> {
     }
     spawn_python_background(&["pipeline", "run", &job_id])?;
     Ok(job_id)
+}
+
+fn detect_disc_for_drive(preferred_drive: Option<String>) -> Result<Option<DiscDrive>, String> {
+    let drives = list_disc_drives()?;
+    if let Some(preferred) = preferred_drive {
+        let normalized = preferred.trim().to_ascii_uppercase();
+        if let Some(match_drive) = drives
+            .iter()
+            .find(|drive| drive.has_media && drive.drive.trim().to_ascii_uppercase() == normalized)
+        {
+            return Ok(Some(DiscDrive {
+                drive: match_drive.drive.clone(),
+                root: match_drive.root.clone(),
+                has_media: match_drive.has_media,
+                volume_label: match_drive.volume_label.clone(),
+            }));
+        }
+    }
+    Ok(drives.into_iter().find(|drive| drive.has_media))
 }
 
 #[tauri::command]
@@ -396,6 +553,8 @@ fn build_python_command(runtime: &RuntimePaths, args: &[&str]) -> Result<Command
         cmd.arg("--config");
         cmd.arg(&runtime.config_path);
         cmd.args(args);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW);
         return Ok(cmd);
     }
 
@@ -411,6 +570,8 @@ fn build_python_command(runtime: &RuntimePaths, args: &[&str]) -> Result<Command
         cmd.arg("--config");
         cmd.arg(&runtime.config_path);
         cmd.args(args);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW);
         return Ok(cmd);
     }
 
@@ -425,10 +586,17 @@ fn build_python_command(runtime: &RuntimePaths, args: &[&str]) -> Result<Command
 fn resolve_runtime_paths() -> Result<RuntimePaths, String> {
     let repo_root = find_repo_root().ok();
     let resources_dir = find_resources_dir();
-    let backend_exe = resources_dir
+    let app_main = repo_root
         .as_ref()
-        .map(|dir| dir.join("backend").join(if cfg!(target_os = "windows") { "autorippr-backend.exe" } else { "autorippr-backend" }))
+        .map(|root| root.join("app").join("main.py"))
         .filter(|path| path.exists());
+    let backend_exe = if cfg!(debug_assertions) && app_main.is_some() {
+        None
+    } else {
+        resources_dir
+            .as_ref()
+            .and_then(|dir| resolve_bundled_backend(dir))
+    };
 
     let config_path = resolve_user_config_path()?;
     if !config_path.exists() {
@@ -441,11 +609,6 @@ fn resolve_runtime_paths() -> Result<RuntimePaths, String> {
         .or_else(|| config_path.parent().map(Path::to_path_buf))
         .ok_or_else(|| "Could not determine a working directory for backend commands".to_string())?;
 
-    let app_main = repo_root
-        .as_ref()
-        .map(|root| root.join("app").join("main.py"))
-        .filter(|path| path.exists());
-
     Ok(RuntimePaths {
         repo_root,
         app_main,
@@ -453,6 +616,19 @@ fn resolve_runtime_paths() -> Result<RuntimePaths, String> {
         config_path,
         working_dir,
     })
+}
+
+fn resolve_bundled_backend(resources_dir: &Path) -> Option<PathBuf> {
+    let exe_name = if cfg!(target_os = "windows") {
+        "autorippr-backend.exe"
+    } else {
+        "autorippr-backend"
+    };
+    let candidates = [
+        resources_dir.join("backend").join(exe_name),
+        resources_dir.join("backend").join("autorippr-backend").join(exe_name),
+    ];
+    candidates.into_iter().find(|path| path.exists())
 }
 
 fn resolve_user_config_path() -> Result<PathBuf, String> {
@@ -481,6 +657,268 @@ fn seed_user_config(config_path: &Path, resources_dir: Option<&Path>, repo_root:
         .ok_or_else(|| "Could not find a config template or local config to seed user config".to_string())?;
     fs::copy(source, config_path).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn read_runtime_config_json(config_path: &Path) -> Result<Value, String> {
+    let raw = fs::read_to_string(config_path).map_err(|e| e.to_string())?;
+    serde_json::from_str::<Value>(&raw).map_err(|e| e.to_string())
+}
+
+fn build_runtime_config_state(config_path: &Path, config: &Value) -> RuntimeConfigState {
+    let validation = validate_runtime_config_value(config);
+    let dependencies = RuntimeDependencies {
+        makemkv: dependency_status(config, "makemkv_path"),
+        ffmpeg: dependency_status(config, "ffmpeg_path"),
+        ffprobe: dependency_status(config, "ffprobe_path"),
+    };
+    let makemkv_status = probe_runtime_makemkv_status(config);
+    RuntimeConfigState {
+        config_path: config_path.to_string_lossy().to_string(),
+        config: config.clone(),
+        validation,
+        dependencies,
+        makemkv_status,
+    }
+}
+
+fn apply_detected_path(config: &mut serde_json::Map<String, Value>, key: &str, detected: Option<String>) {
+    if let Some(path) = detected {
+        let current = config.get(key).and_then(|value| value.as_str()).unwrap_or_default();
+        if is_blank_or_placeholder(current) || !Path::new(current).exists() {
+            config.insert(key.to_string(), Value::String(path));
+        }
+    }
+}
+
+fn dependency_status(config: &Value, key: &str) -> RuntimeDependencyStatus {
+    let path = config
+        .get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let exists = !path.trim().is_empty() && Path::new(&path).exists();
+    RuntimeDependencyStatus { path, exists }
+}
+
+fn probe_runtime_makemkv_status(config: &Value) -> RuntimeMakeMkvStatus {
+    let path = config
+        .get("makemkv_path")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if path.is_empty() || !Path::new(&path).exists() {
+        return RuntimeMakeMkvStatus {
+            level: "ok".to_string(),
+            message: String::new(),
+            details: Vec::new(),
+            build_version: None,
+            can_rip: None,
+            beta_key_expires_at: None,
+            days_until_expiry: None,
+            checked_at: None,
+            source_url: Some("https://forum.makemkv.com/forum/viewtopic.php?f=5&t=1053".to_string()),
+        };
+    }
+
+    match run_python_json(&["makemkv-status"]) {
+        Ok(value) => runtime_makemkv_status_from_value(&value),
+        Err(err) => RuntimeMakeMkvStatus {
+            level: "warning".to_string(),
+            message: "Could not verify MakeMKV beta-key status.".to_string(),
+            details: vec![err],
+            build_version: None,
+            can_rip: None,
+            beta_key_expires_at: None,
+            days_until_expiry: None,
+            checked_at: None,
+            source_url: Some("https://forum.makemkv.com/forum/viewtopic.php?f=5&t=1053".to_string()),
+        },
+    }
+}
+
+fn runtime_makemkv_status_from_value(value: &Value) -> RuntimeMakeMkvStatus {
+    let details = value
+        .get("details")
+        .and_then(|entry| entry.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    RuntimeMakeMkvStatus {
+        level: value
+            .get("level")
+            .and_then(|entry| entry.as_str())
+            .unwrap_or("ok")
+            .to_string(),
+        message: value
+            .get("message")
+            .and_then(|entry| entry.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        details,
+        build_version: value
+            .get("build_version")
+            .and_then(|entry| entry.as_str())
+            .map(ToString::to_string),
+        can_rip: value.get("can_rip").and_then(|entry| entry.as_bool()),
+        beta_key_expires_at: value
+            .get("beta_key_expires_at")
+            .and_then(|entry| entry.as_str())
+            .map(ToString::to_string),
+        days_until_expiry: value.get("days_until_expiry").and_then(|entry| entry.as_i64()),
+        checked_at: value
+            .get("checked_at")
+            .and_then(|entry| entry.as_str())
+            .map(ToString::to_string),
+        source_url: value
+            .get("source_url")
+            .and_then(|entry| entry.as_str())
+            .map(ToString::to_string),
+    }
+}
+
+fn detect_makemkv_path() -> Option<String> {
+    let candidates = [
+        r"C:\Program Files (x86)\MakeMKV\makemkvcon64.exe",
+        r"C:\Program Files\MakeMKV\makemkvcon64.exe",
+    ];
+    candidates
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| path.exists())
+        .map(|path| path.to_string_lossy().to_string())
+        .or_else(|| detect_from_where("makemkvcon64.exe"))
+}
+
+fn detect_ffmpeg_path() -> Option<String> {
+    detect_tool_path(
+        "ffmpeg.exe",
+        &[
+            r"C:\tools\ffmpeg\bin\ffmpeg.exe",
+            r"C:\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+        ],
+    )
+}
+
+fn detect_ffprobe_path() -> Option<String> {
+    detect_tool_path(
+        "ffprobe.exe",
+        &[
+            r"C:\tools\ffmpeg\bin\ffprobe.exe",
+            r"C:\ffmpeg\bin\ffprobe.exe",
+            r"C:\Program Files\ffmpeg\bin\ffprobe.exe",
+        ],
+    )
+}
+
+fn detect_tool_path(exe_name: &str, candidates: &[&str]) -> Option<String> {
+    candidates
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| path.exists())
+        .map(|path| path.to_string_lossy().to_string())
+        .or_else(|| detect_from_where(exe_name))
+}
+
+fn detect_from_where(exe_name: &str) -> Option<String> {
+    let output = Command::new("where")
+        .arg(exe_name)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.to_string())
+}
+
+fn validate_runtime_config_value(config: &Value) -> RuntimeConfigValidation {
+    let required = [
+        "tmdb_api_key",
+        "makemkv_path",
+        "ffmpeg_path",
+        "ffprobe_path",
+        "staging_root",
+        "nas_root",
+    ];
+    let mut missing: Vec<&str> = Vec::new();
+    for key in required {
+        let value = config.get(key).and_then(|candidate| candidate.as_str()).unwrap_or_default();
+        if is_blank_or_placeholder(value) {
+            missing.push(key);
+        }
+    }
+    if missing.is_empty() {
+        RuntimeConfigValidation {
+            ok: true,
+            message: "Configuration looks ready.".to_string(),
+        }
+    } else {
+        RuntimeConfigValidation {
+            ok: false,
+            message: format!("Missing or placeholder config values: {}", missing.join(", ")),
+        }
+    }
+}
+
+fn is_blank_or_placeholder(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    upper.starts_with("REPLACE_WITH_") || upper.starts_with("YOUR_")
+}
+
+fn browse_windows_path(title: String, initial_path: Option<String>, directory: bool) -> Result<Option<String>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let safe_title = title.replace('\'', "''");
+        let safe_initial = initial_path.unwrap_or_default().replace('\'', "''");
+        let script = if directory {
+            format!(
+                "Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = '{safe_title}'; if ('{safe_initial}' -ne '') {{ $dialog.SelectedPath = '{safe_initial}' }}; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ $dialog.SelectedPath }}"
+            )
+        } else {
+            format!(
+                "Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.OpenFileDialog; $dialog.Title = '{safe_title}'; if ('{safe_initial}' -ne '') {{ if (Test-Path '{safe_initial}') {{ $item = Get-Item '{safe_initial}'; if ($item.PSIsContainer) {{ $dialog.InitialDirectory = '{safe_initial}' }} else {{ $dialog.InitialDirectory = Split-Path '{safe_initial}' -Parent; $dialog.FileName = Split-Path '{safe_initial}' -Leaf }} }} }}; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ $dialog.FileName }}"
+            )
+        };
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if stderr.is_empty() { "Path browse cancelled or failed".to_string() } else { stderr });
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if stdout.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(stdout));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = title;
+        let _ = initial_path;
+        let _ = directory;
+        Err("Browse dialogs are currently implemented for Windows only.".to_string())
+    }
 }
 
 fn find_resources_dir() -> Option<PathBuf> {

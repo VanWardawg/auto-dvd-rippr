@@ -34,6 +34,16 @@ class ConfigError(ValueError):
     pass
 
 
+def _is_blank_or_placeholder(value: Any) -> bool:
+    if not isinstance(value, str):
+        return True
+    normalized = value.strip()
+    if not normalized:
+        return True
+    upper = normalized.upper()
+    return upper.startswith("REPLACE_WITH_") or upper.startswith("YOUR_")
+
+
 @dataclass(frozen=True)
 class AppConfig:
     tmdb_api_key: str
@@ -78,7 +88,7 @@ def load_config(config_path: str) -> AppConfig:
     missing: list[str] = []
     for key in REQUIRED_KEYS:
         val = merged.get(key)
-        if not isinstance(val, str) or not val.strip():
+        if _is_blank_or_placeholder(val):
             missing.append(key)
 
     if missing:

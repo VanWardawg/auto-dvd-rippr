@@ -53,6 +53,7 @@ def can_transition(from_status: str, to_status: str) -> bool:
 def create_job(
     conn,
     disc_label: str = "",
+    optical_drive: str | None = None,
     media_type: str = "tv",
     movie_mode: str = "single",
     disc_scope: str | None = None,
@@ -65,14 +66,15 @@ def create_job(
     conn.execute(
         """
         INSERT INTO jobs (
-            id, disc_label, media_type, movie_mode, disc_scope, season_number, episode_range_start, episode_range_end,
+            id, disc_label, optical_drive, media_type, movie_mode, disc_scope, season_number, episode_range_start, episode_range_end,
             status, current_stage, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', ?, ?)
         """,
         (
             job_id,
             disc_label,
+            optical_drive,
             media_type,
             movie_mode,
             disc_scope,

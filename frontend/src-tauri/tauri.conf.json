@@ -27,7 +27,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": ["resources/**"],
+    "resources": [
+      "resources/README.txt",
+      "resources/backend",
+      "resources/config"
+    ],
     "icon": ["icons/icon.ico"]
   }
 }

@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyInstaller
+        run: python -m pip install pyinstaller
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build self-contained assets
+        working-directory: frontend
+        run: npm run build:self-contained
+
+      - name: Build Tauri release bundle
+        working-directory: frontend
+        run: npm run tauri -- build
+
+      - name: Generate checksums
+        shell: pwsh
+        run: |
+          $bundleRoot = "frontend/src-tauri/target/release/bundle"
+          $checksumFile = Join-Path $bundleRoot "SHA256SUMS.txt"
+          if (Test-Path $checksumFile) { Remove-Item $checksumFile -Force }
+          Get-ChildItem -Path $bundleRoot -Recurse -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" } | ForEach-Object {
+            $hash = Get-FileHash -Algorithm SHA256 -Path $_.FullName
+            $relative = $_.FullName.Substring((Resolve-Path $bundleRoot).Path.Length + 1).Replace("\", "/")
+            "$($hash.Hash)  $relative" | Out-File -FilePath $checksumFile -Append -Encoding utf8
+          }
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            frontend/src-tauri/target/release/bundle/**/*

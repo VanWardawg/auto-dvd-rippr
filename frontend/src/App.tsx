@@ -1,10 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   detectDisc,
   analyzeMenu,
+  autodetectRuntimeConfig,
+  browseDirectoryPath,
+  browseFilePath,
   cancelJob,
   clearLocalArtifacts,
+  listDiscDrives,
   deleteJob,
+  getRuntimeConfigState,
   getJobSnapshot,
   listJobs,
   openPath,
@@ -22,9 +28,10 @@ import {
   rerunIdentify,
   rerunMapping,
   resumePipeline,
+  saveRuntimeConfig,
   startPipeline,
 } from "./api";
-import type { EpisodeMapping, JobLog, JobSnapshot, JobStatus, JobSummary, RipTitle, SelectedMovieSlot, SplitPlan, StartJobRequest, TmdbCandidate } from "./types";
+import type { DiscDrive, EpisodeMapping, JobLog, JobSnapshot, JobStatus, JobSummary, RipTitle, RuntimeConfigState, SelectedMovieSlot, SplitPlan, StartJobRequest, TmdbCandidate } from "./types";
 
 const POLL_MS = 3000;
 const TV_PIPELINE_STAGES: JobStatus[] = ["queued", "identifying", "ripping", "mapping", "splitting", "renaming", "copying", "done"];
@@ -57,6 +64,13 @@ type GuidedSplitDraft = {
   segmentIndex: number;
   startSeconds: string;
   endSeconds: string;
+};
+
+type DriveCardState = {
+  id: string;
+  form: StartJobRequest;
+  continuousMode: boolean;
+  continuousStatus: string | null;
 };
 
 function parseTitles(value?: string) {
@@ -192,6 +206,13 @@ function formatCompletionSince(value?: string | null) {
   return `Completed ${hours}h ${mins % 60}m ago`;
 }
 
+function formatCalendarDate(value?: string | null) {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) return value;
+  return new Date(parsed).toLocaleDateString();
+}
+
 function getPipelineStages(mediaType?: "tv" | "movie" | null) {
   return mediaType === "movie" ? MOVIE_PIPELINE_STAGES : TV_PIPELINE_STAGES;
 }
@@ -247,6 +268,7 @@ function normalizeStartRequest(form: StartJobRequest): StartJobRequest {
   if (form.mediaType === "movie") {
     return {
       discLabel: form.discLabel,
+      opticalDrive: form.opticalDrive ?? null,
       mediaType: form.mediaType,
       movieMode: form.movieMode,
     };
@@ -254,6 +276,7 @@ function normalizeStartRequest(form: StartJobRequest): StartJobRequest {
   if (form.discScope === "partial_season") {
     return {
       discLabel: form.discLabel,
+      opticalDrive: form.opticalDrive ?? null,
       mediaType: form.mediaType,
       discScope: form.discScope,
       seasonNumber: form.seasonNumber ?? null,
@@ -263,6 +286,7 @@ function normalizeStartRequest(form: StartJobRequest): StartJobRequest {
   }
   return {
     discLabel: form.discLabel,
+    opticalDrive: form.opticalDrive ?? null,
     mediaType: form.mediaType,
     discScope: form.discScope,
     seasonNumber: form.seasonNumber ?? null,
@@ -271,36 +295,71 @@ function normalizeStartRequest(form: StartJobRequest): StartJobRequest {
   };
 }
 
-export default function App() {
-  const [jobs, setJobs] = useState<JobSummary[]>([]);
-  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null);
-  const [activeTab, setActiveTab] = useState<"overview" | "activity" | "artifacts" | "json">("overview");
-  const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [continuousMode, setContinuousMode] = useState(false);
-  const [continuousStatus, setContinuousStatus] = useState<string | null>(null);
-  const [modal, setModal] = useState<null | "tmdb" | "map" | "file" | "split" | "review">(null);
-  const [modalJobId, setModalJobId] = useState<string | null>(null);
-  const [modalValues, setModalValues] = useState<Record<string, string>>({});
-  const [guidedReviewRows, setGuidedReviewRows] = useState<GuidedReviewRowDraft[]>([]);
-  const [guidedSplitDrafts, setGuidedSplitDrafts] = useState<GuidedSplitDraft[]>([]);
-  const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
-  const [form, setForm] = useState<StartJobRequest>({
+function buildConfigDraft(config?: Record<string, unknown> | null) {
+  const source = config ?? {};
+  return {
+    tmdb_api_key: String(source.tmdb_api_key ?? ""),
+    makemkv_path: String(source.makemkv_path ?? ""),
+    ffmpeg_path: String(source.ffmpeg_path ?? ""),
+    ffprobe_path: String(source.ffprobe_path ?? ""),
+    staging_root: String(source.staging_root ?? ""),
+    nas_root: String(source.nas_root ?? ""),
+    default_order_mode: String(source.default_order_mode ?? "aired"),
+    collision_policy: String(source.collision_policy ?? "skip"),
+  };
+}
+
+function createCardId() {
+  return globalThis.crypto?.randomUUID?.() ?? `drive-card-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function buildDefaultStartJobRequest(): StartJobRequest {
+  return {
     discLabel: "",
+    opticalDrive: null,
     mediaType: "movie",
     movieMode: "single",
     discScope: "full_season",
     seasonNumber: 1,
     episodeRangeStart: 1,
     episodeRangeEnd: 10,
-  });
+  };
+}
+
+function buildDriveCardState(): DriveCardState {
+  return {
+    id: createCardId(),
+    form: buildDefaultStartJobRequest(),
+    continuousMode: false,
+    continuousStatus: null,
+  };
+}
+
+export default function App() {
+  const [jobs, setJobs] = useState<JobSummary[]>([]);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null);
+  const [activeTab, setActiveTab] = useState<"overview" | "activity" | "artifacts" | "json" | "settings">("overview");
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [configState, setConfigState] = useState<RuntimeConfigState | null>(null);
+  const [configDraft, setConfigDraft] = useState<Record<string, string>>(buildConfigDraft());
+  const [configLoading, setConfigLoading] = useState(true);
+  const [configReady, setConfigReady] = useState(false);
+  const [discDrives, setDiscDrives] = useState<DiscDrive[]>([]);
+  const [driveCards, setDriveCards] = useState<DriveCardState[]>([buildDriveCardState()]);
+  const [modal, setModal] = useState<null | "tmdb" | "map" | "file" | "split" | "review">(null);
+  const [modalJobId, setModalJobId] = useState<string | null>(null);
+  const [modalValues, setModalValues] = useState<Record<string, string>>({});
+  const [guidedReviewRows, setGuidedReviewRows] = useState<GuidedReviewRowDraft[]>([]);
+  const [guidedSplitDrafts, setGuidedSplitDrafts] = useState<GuidedSplitDraft[]>([]);
+  const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
   const selectedJobIdRef = useRef<string | null>(null);
   const jobsRef = useRef<JobSummary[]>([]);
-  const formRef = useRef<StartJobRequest>(form);
+  const driveCardsRef = useRef<DriveCardState[]>(driveCards);
   const busyActionRef = useRef<string | null>(null);
-  const lastAutoStartedDiscRef = useRef<string | null>(null);
-  const autoStartInFlightRef = useRef<string | null>(null);
+  const lastAutoStartedDiscRef = useRef<Record<string, string | null>>({});
+  const autoStartInFlightRef = useRef<Record<string, string | null>>({});
 
   async function refreshJobs() {
     try {
@@ -328,6 +387,67 @@ export default function App() {
     }
   }
 
+  async function loadConfigState() {
+    try {
+      const next = await getRuntimeConfigState();
+      setConfigState(next);
+      setConfigDraft(buildConfigDraft(next.config));
+      setConfigReady(next.validation.ok);
+      if (!next.validation.ok) {
+        setActiveTab("settings");
+      }
+      setError(null);
+    } catch (err) {
+      setConfigReady(false);
+      setError(String(err));
+    } finally {
+      setConfigLoading(false);
+    }
+  }
+
+  async function saveConfigFromDraft() {
+    await runAction("Saving settings", async () => {
+      const next = await saveRuntimeConfig({
+        ...(configState?.config ?? {}),
+        ...configDraft,
+      });
+      setConfigState(next);
+      setConfigReady(next.validation.ok);
+      if (next.validation.ok) {
+        setActiveTab("overview");
+        await refreshJobs();
+        await refreshAllDriveCards();
+      } else {
+        setActiveTab("settings");
+      }
+    });
+  }
+
+  async function autodetectConfig() {
+    await runAction("Auto-detecting tools", async () => {
+      const next = await autodetectRuntimeConfig();
+      setConfigState(next);
+      setConfigDraft(buildConfigDraft(next.config));
+      setConfigReady(next.validation.ok);
+      if (!next.validation.ok) {
+        setActiveTab("settings");
+      }
+    });
+  }
+
+  async function pickConfigPath(
+    key: "makemkv_path" | "ffmpeg_path" | "ffprobe_path" | "staging_root" | "nas_root",
+    kind: "file" | "directory",
+    title: string,
+  ) {
+    const current = configDraft[key] ?? "";
+    const selected = kind === "file"
+      ? await browseFilePath(title, current)
+      : await browseDirectoryPath(title, current);
+    if (!selected) return;
+    setConfigDraft((value) => ({ ...value, [key]: selected }));
+  }
+
   useEffect(() => {
     selectedJobIdRef.current = selectedJobId;
   }, [selectedJobId]);
@@ -337,23 +457,55 @@ export default function App() {
   }, [jobs]);
 
   useEffect(() => {
-    formRef.current = form;
-  }, [form]);
+    driveCardsRef.current = driveCards;
+  }, [driveCards]);
 
   useEffect(() => {
     busyActionRef.current = busyAction;
   }, [busyAction]);
 
   useEffect(() => {
-    void refreshJobs();
-    void handleRefreshDisc();
-    const timer = window.setInterval(() => void refreshJobs(), POLL_MS);
-    return () => window.clearInterval(timer);
+    void loadConfigState();
   }, []);
 
   useEffect(() => {
-    if (!continuousMode) {
-      setContinuousStatus(null);
+    let disposed = false;
+    const unsubscribePromise = listen<string>("app-menu", async (event) => {
+      if (disposed) return;
+      if (event.payload === "settings") {
+        setActiveTab("settings");
+      } else if (event.payload === "reload-config") {
+        await loadConfigState();
+      }
+    });
+    return () => {
+      disposed = true;
+      void unsubscribePromise.then((unsubscribe) => unsubscribe());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!configReady) return;
+    void refreshJobs();
+    void refreshAllDriveCards();
+    const timer = window.setInterval(() => void refreshJobs(), POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [configReady]);
+
+  useEffect(() => {
+    if (!configReady) return;
+    if (configState?.makemkvStatus?.level === "error") {
+      setDriveCards((cards) =>
+        cards.map((card) =>
+          card.continuousMode
+            ? {
+                ...card,
+                continuousStatus:
+                  configState.makemkvStatus.message || "Continuous mode paused — MakeMKV needs attention",
+              }
+            : card,
+        ),
+      );
       return;
     }
 
@@ -362,65 +514,126 @@ export default function App() {
       if (cancelled || busyActionRef.current !== null) {
         return;
       }
+      const activeCards = driveCardsRef.current.filter((card) => card.continuousMode);
+      if (activeCards.length === 0) {
+        return;
+      }
       try {
-        const disc = await detectDisc();
+        const drives = await listDiscDrives();
         if (cancelled) return;
-        if (!disc?.has_media) {
-          lastAutoStartedDiscRef.current = null;
-          setContinuousStatus("Continuous mode on — waiting for disc");
-          return;
-        }
+        setDiscDrives(drives);
+        for (const card of activeCards) {
+          const disc = await detectDisc(card.form.opticalDrive);
+          if (cancelled) return;
+          if (!disc?.has_media) {
+            lastAutoStartedDiscRef.current[card.id] = null;
+            setDriveCards((cards) =>
+              cards.map((entry) =>
+                entry.id === card.id ? { ...entry, continuousStatus: "Continuous mode on — waiting for disc" } : entry,
+              ),
+            );
+            continue;
+          }
 
-        const signature = `${disc.drive}|${disc.volume_label}`;
-        if (lastAutoStartedDiscRef.current === signature) {
-          setContinuousStatus(`Watching disc: ${disc.volume_label}`);
-          return;
-        }
-        setForm((value) => ({
-          ...value,
-          discLabel: disc.volume_label || value.discLabel,
-        }));
+          const signature = `${disc.drive}|${disc.volume_label}`;
+          if (lastAutoStartedDiscRef.current[card.id] === signature) {
+            setDriveCards((cards) =>
+              cards.map((entry) =>
+                entry.id === card.id ? { ...entry, continuousStatus: `Watching disc: ${disc.volume_label}` } : entry,
+              ),
+            );
+            continue;
+          }
+          setDriveCards((cards) =>
+            cards.map((entry) =>
+              entry.id === card.id
+                ? {
+                    ...entry,
+                    form: {
+                      ...entry.form,
+                      opticalDrive: disc.drive,
+                      discLabel: disc.volume_label || entry.form.discLabel,
+                    },
+                  }
+                : entry,
+            ),
+          );
 
-        if (autoStartInFlightRef.current === signature) {
-          setContinuousStatus(`Auto-start already in progress: ${disc.volume_label}`);
-          return;
-        }
+          if (autoStartInFlightRef.current[card.id] === signature) {
+            setDriveCards((cards) =>
+              cards.map((entry) =>
+                entry.id === card.id
+                  ? { ...entry, continuousStatus: `Auto-start already in progress: ${disc.volume_label}` }
+                  : entry,
+              ),
+            );
+            continue;
+          }
 
-        const hasActiveDiscJob = jobsRef.current.some((job) => job.status === "queued" || job.status === "ripping");
-        if (hasActiveDiscJob) {
-          setContinuousStatus(`Disc detected: ${disc.volume_label} — waiting for active rip to finish`);
-          return;
-        }
+          const hasActiveDiscJob = jobsRef.current.some(
+            (job) =>
+              (job.status === "queued" || job.status === "ripping") &&
+              ((job.optical_drive ?? "").toUpperCase() === disc.drive.toUpperCase()),
+          );
+          if (hasActiveDiscJob) {
+            setDriveCards((cards) =>
+              cards.map((entry) =>
+                entry.id === card.id
+                  ? { ...entry, continuousStatus: `Disc detected: ${disc.volume_label} — waiting for active rip to finish` }
+                  : entry,
+              ),
+            );
+            continue;
+          }
 
-        const matchingExistingJob = jobsRef.current.find(
-          (job) =>
-            job.disc_label === disc.volume_label,
-        );
-        if (matchingExistingJob) {
-          lastAutoStartedDiscRef.current = signature;
-          setContinuousStatus(`Disc already has an active job: ${disc.volume_label}`);
-          return;
-        }
+          const matchingExistingJob = jobsRef.current.find(
+            (job) =>
+              job.disc_label === disc.volume_label &&
+              (job.optical_drive ?? "").toUpperCase() === disc.drive.toUpperCase(),
+          );
+          if (matchingExistingJob) {
+            lastAutoStartedDiscRef.current[card.id] = signature;
+            setDriveCards((cards) =>
+              cards.map((entry) =>
+                entry.id === card.id
+                  ? { ...entry, continuousStatus: `Disc already has an active job: ${disc.volume_label}` }
+                  : entry,
+              ),
+            );
+            continue;
+          }
 
-        setContinuousStatus(`Auto-starting: ${disc.volume_label}`);
-        lastAutoStartedDiscRef.current = signature;
-        autoStartInFlightRef.current = signature;
-        setError(null);
-        const request: StartJobRequest = {
-          ...normalizeStartRequest(formRef.current),
-          discLabel: disc.volume_label || formRef.current.discLabel,
-        };
-        const jobId = await startPipeline(request);
-        setSelectedJobId(jobId);
-        await refreshJobs();
-        await refreshSnapshot(jobId);
-        setContinuousStatus(`Started: ${disc.volume_label}`);
+          setDriveCards((cards) =>
+            cards.map((entry) =>
+              entry.id === card.id ? { ...entry, continuousStatus: `Auto-starting: ${disc.volume_label}` } : entry,
+            ),
+          );
+          lastAutoStartedDiscRef.current[card.id] = signature;
+          autoStartInFlightRef.current[card.id] = signature;
+          setError(null);
+          const request: StartJobRequest = {
+            ...normalizeStartRequest(card.form),
+            opticalDrive: disc.drive,
+            discLabel: disc.volume_label || card.form.discLabel,
+          };
+          const jobId = await startPipeline(request);
+          setSelectedJobId(jobId);
+          await refreshJobs();
+          await refreshSnapshot(jobId);
+          setDriveCards((cards) =>
+            cards.map((entry) =>
+              entry.id === card.id ? { ...entry, continuousStatus: `Started: ${disc.volume_label}` } : entry,
+            ),
+          );
+          autoStartInFlightRef.current[card.id] = null;
+        }
       } catch (err) {
         setError(String(err));
-        setContinuousStatus("Continuous mode hit an error");
-        lastAutoStartedDiscRef.current = null;
-      } finally {
-        autoStartInFlightRef.current = null;
+        setDriveCards((cards) =>
+          cards.map((card) =>
+            card.continuousMode ? { ...card, continuousStatus: "Continuous mode hit an error" } : card,
+          ),
+        );
       }
     };
 
@@ -430,27 +643,63 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [continuousMode]);
+  }, [configReady, configState?.makemkvStatus?.level, configState?.makemkvStatus?.message]);
 
-  async function handleRefreshDisc() {
+  async function refreshDriveCard(cardId: string) {
     try {
-      const disc = await detectDisc();
-      setForm((v) => ({
-        ...v,
-        discLabel: disc?.volume_label ?? "",
-      }));
+      const drives = await listDiscDrives();
+      setDiscDrives(drives);
+      const card = driveCardsRef.current.find((entry) => entry.id === cardId);
+      if (!card) return;
+      const currentDrive = card.form.opticalDrive ?? null;
+      const disc = await detectDisc(currentDrive);
+      setDriveCards((cards) =>
+        cards.map((entry) =>
+          entry.id === cardId
+            ? {
+                ...entry,
+                form: {
+                  ...entry.form,
+                  opticalDrive: disc?.drive ?? entry.form.opticalDrive ?? drives[0]?.drive ?? null,
+                  discLabel: disc?.volume_label ?? entry.form.discLabel,
+                },
+              }
+            : entry,
+        ),
+      );
       setError(null);
     } catch (err) {
       setError(String(err));
     }
   }
 
+  async function refreshAllDriveCards() {
+    const cards = driveCardsRef.current;
+    if (!cards.length) return;
+    await Promise.all(cards.map((card) => refreshDriveCard(card.id)));
+  }
+
+  function updateDriveCard(cardId: string, updater: (card: DriveCardState) => DriveCardState) {
+    setDriveCards((cards) => cards.map((card) => (card.id === cardId ? updater(card) : card)));
+  }
+
+  function addDriveCard() {
+    setDriveCards((cards) => [...cards, buildDriveCardState()]);
+  }
+
+  function removeDriveCard(cardId: string) {
+    setDriveCards((cards) => (cards.length > 1 ? cards.filter((card) => card.id !== cardId) : cards));
+    delete lastAutoStartedDiscRef.current[cardId];
+    delete autoStartInFlightRef.current[cardId];
+  }
+
   useEffect(() => {
+    if (!configReady) return;
     if (!selectedJobId) return;
     void refreshSnapshot(selectedJobId);
     const timer = window.setInterval(() => void refreshSnapshot(selectedJobId), POLL_MS + 1000);
     return () => window.clearInterval(timer);
-  }, [selectedJobId]);
+  }, [configReady, selectedJobId]);
 
   useEffect(() => {
     setActionsMenuOpen(false);
@@ -505,6 +754,7 @@ export default function App() {
   const splitPlanOptions = useMemo(() => snapshot?.split_plans ?? [], [snapshot]);
   const reviewState = snapshot?.review_state ?? null;
   const progressState = snapshot?.progress_state ?? null;
+  const makemkvStatus = configState?.makemkvStatus ?? null;
   const selectedMovies = useMemo(() => snapshot?.selected_movies ?? [], [snapshot]);
   const hasLocalArtifacts = Boolean(
     snapshot &&
@@ -548,6 +798,10 @@ export default function App() {
   const progressPercent = snapshot ? Math.round((progressState?.overall_fraction ?? (getProgressPercent(snapshot.job.status, pipelineStages) / 100)) * 100) : 0;
   const currentStageIndex = snapshot ? getPipelineStageIndex(snapshot.job.status, pipelineStages, snapshot.job.current_stage) : 0;
   const progressEta = formatEta(progressState?.eta_seconds);
+  const showSettingsTab = activeTab === "settings" || !configReady;
+  const makemkvBlocking = makemkvStatus?.level === "error";
+  const showMakemkvBanner = Boolean(configReady && makemkvStatus && makemkvStatus.level !== "ok" && makemkvStatus.message);
+  const makemkvExpiryLabel = formatCalendarDate(makemkvStatus?.betaKeyExpiresAt);
   const stageDuration = snapshot?.job.status === "done"
     ? formatCompletionSince(stageStartAt)
     : formatDurationSince(stageStartAt);
@@ -588,10 +842,6 @@ export default function App() {
       };
     });
   }, [modal, tmdbCandidates]);
-  const showDiscScope = form.mediaType === "tv";
-  const showSeasonNumber = form.mediaType === "tv";
-  const showEpisodeRange = form.mediaType === "tv" && form.discScope === "partial_season";
-  const showMovieMode = form.mediaType === "movie";
   const allSeasonEpisodeOptions = useMemo(() => {
     return (snapshot?.all_season_episodes ?? [])
       .map((episode) => ({
@@ -965,143 +1215,263 @@ export default function App() {
             <h1>Auto-Ripper</h1>
             <p>Desktop workflow for rip, map, split, and transfer.</p>
           </div>
-          <button className="ghost-button" onClick={() => void refreshJobs()}>
-            Refresh
-          </button>
+          <div className="toolbar-actions">
+            <button className="ghost-button" onClick={() => setActiveTab("settings")}>
+              Settings
+            </button>
+            <button className="ghost-button" disabled={!configReady} onClick={() => void refreshJobs()}>
+              Refresh
+            </button>
+          </div>
         </div>
+
+        <section className="app-controls-card">
+          <div className="section-header">
+            <h2>App</h2>
+            <span className={`status-pill status-${configReady ? "done" : "error"}`}>
+              {configReady ? "Ready" : "Setup needed"}
+            </span>
+          </div>
+          <div className="app-controls-grid">
+            <button className="primary-button" onClick={() => setActiveTab("settings")}>
+              Settings
+            </button>
+            <button disabled={busyAction !== null} onClick={() => void loadConfigState()}>
+              Reload Config
+            </button>
+            <button disabled={busyAction !== null} onClick={() => void autodetectConfig()}>
+              Auto-detect Tools
+            </button>
+            <button disabled={!configReady || busyAction !== null} onClick={() => void refreshJobs()}>
+              Refresh Jobs
+            </button>
+          </div>
+          {!configReady ? (
+            <p className="app-controls-note">
+              Complete Settings before ripping. The app will store everything in your user config automatically.
+            </p>
+          ) : makemkvBlocking ? (
+            <p className="app-controls-note">{makemkvStatus?.message}</p>
+          ) : null}
+        </section>
 
         <section className="start-card">
           <div className="section-header">
             <h2>Start new disc</h2>
-            <button
-              type="button"
-              className={continuousMode ? "primary-button" : undefined}
-              disabled={busyAction !== null}
-              onClick={() => setContinuousMode((value) => !value)}
-            >
-              {continuousMode ? "Continuous On" : "Continuous Off"}
+            <button type="button" disabled={busyAction !== null || !configReady} onClick={addDriveCard}>
+              + Drive
             </button>
           </div>
-          <div className="form-grid">
-            <label>
-              <span>Disc label</span>
-              <input
-                value={form.discLabel}
-                onChange={(e) => setForm((v) => ({ ...v, discLabel: e.target.value }))}
-              />
-            </label>
-            <label>
-              <span>&nbsp;</span>
-              <button type="button" onClick={() => void handleRefreshDisc()}>
-                Refresh Disc
-              </button>
-            </label>
-            <label>
-              <span>Media type</span>
-              <select
-                value={form.mediaType}
-                onChange={(e) => setForm((v) => ({ ...v, mediaType: e.target.value as "tv" | "movie" }))}
-              >
-                <option value="tv">TV</option>
-                <option value="movie">Movie</option>
-              </select>
-            </label>
-            {showDiscScope ? (
-              <label>
-                <span>Disc scope</span>
-                <select
-                  value={form.discScope}
-                  onChange={(e) =>
-                    setForm((v) => ({
-                      ...v,
-                        discScope: e.target.value as "full_season" | "partial_season" | "special" | "custom",
-                      }))
+          <div className="drive-cards">
+            {driveCards.map((card, index) => {
+              const showDiscScope = card.form.mediaType === "tv";
+              const showSeasonNumber = card.form.mediaType === "tv";
+              const showEpisodeRange = card.form.mediaType === "tv" && card.form.discScope === "partial_season";
+              const showMovieMode = card.form.mediaType === "movie";
+              return (
+                <div key={card.id} className="drive-card">
+                  <div className="drive-card-header">
+                    <div>
+                      <h3>{`Drive ${index + 1}`}</h3>
+                      <p>{card.form.opticalDrive ? `Watching ${card.form.opticalDrive}` : "Auto / first disc with media"}</p>
+                    </div>
+                    <div className="drive-card-actions">
+                      <button
+                        type="button"
+                        className={card.continuousMode ? "primary-button" : undefined}
+                        disabled={busyAction !== null || !configReady || (makemkvBlocking && !card.continuousMode)}
+                        onClick={() =>
+                          updateDriveCard(card.id, (value) => ({
+                            ...value,
+                            continuousMode: !value.continuousMode,
+                            continuousStatus: !value.continuousMode ? "Continuous mode on — waiting for disc" : null,
+                          }))
+                        }
+                      >
+                        {card.continuousMode ? "Continuous On" : "Continuous Off"}
+                      </button>
+                      {driveCards.length > 1 ? (
+                        <button type="button" className="ghost-button" disabled={busyAction !== null} onClick={() => removeDriveCard(card.id)}>
+                          Remove
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="form-grid">
+                    <label>
+                      <span>Disc label</span>
+                      <input
+                        value={card.form.discLabel}
+                        onChange={(e) =>
+                          updateDriveCard(card.id, (value) => ({
+                            ...value,
+                            form: { ...value.form, discLabel: e.target.value },
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span>&nbsp;</span>
+                      <button type="button" disabled={!configReady} onClick={() => void refreshDriveCard(card.id)}>
+                        Refresh Disc
+                      </button>
+                    </label>
+                    <label>
+                      <span>Optical drive</span>
+                      <select
+                        value={card.form.opticalDrive ?? ""}
+                        onChange={(e) => {
+                          const nextDrive = e.target.value || null;
+                          const selectedDrive = discDrives.find((drive) => drive.drive === nextDrive) ?? null;
+                          updateDriveCard(card.id, (value) => ({
+                            ...value,
+                            form: {
+                              ...value.form,
+                              opticalDrive: nextDrive,
+                              discLabel: selectedDrive?.has_media ? (selectedDrive.volume_label || value.form.discLabel) : value.form.discLabel,
+                            },
+                          }));
+                        }}
+                      >
+                        <option value="">Auto / first disc with media</option>
+                        {discDrives.map((drive) => (
+                          <option key={drive.drive} value={drive.drive}>
+                            {drive.drive} {drive.has_media ? `• ${drive.volume_label || "Disc inserted"}` : "• Empty"}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>Media type</span>
+                      <select
+                        value={card.form.mediaType}
+                        onChange={(e) =>
+                          updateDriveCard(card.id, (value) => ({
+                            ...value,
+                            form: { ...value.form, mediaType: e.target.value as "tv" | "movie" },
+                          }))
+                        }
+                      >
+                        <option value="tv">TV</option>
+                        <option value="movie">Movie</option>
+                      </select>
+                    </label>
+                    {showDiscScope ? (
+                      <label>
+                        <span>Disc scope</span>
+                        <select
+                          value={card.form.discScope}
+                          onChange={(e) =>
+                            updateDriveCard(card.id, (value) => ({
+                              ...value,
+                              form: {
+                                ...value.form,
+                                discScope: e.target.value as "full_season" | "partial_season" | "special" | "custom",
+                              },
+                            }))
+                          }
+                        >
+                          <option value="full_season">Full season</option>
+                          <option value="partial_season">Partial season</option>
+                          <option value="special">Special</option>
+                          <option value="custom">Custom</option>
+                        </select>
+                      </label>
+                    ) : null}
+                    {showMovieMode ? (
+                      <label>
+                        <span>Movie mode</span>
+                        <select
+                          value={card.form.movieMode ?? "single"}
+                          onChange={(e) =>
+                            updateDriveCard(card.id, (value) => ({
+                              ...value,
+                              form: {
+                                ...value.form,
+                                movieMode: e.target.value as "single" | "double_feature" | "trilogy",
+                              },
+                            }))
+                          }
+                        >
+                          <option value="single">Single</option>
+                          <option value="double_feature">Double Feature</option>
+                          <option value="trilogy">Trilogy</option>
+                        </select>
+                      </label>
+                    ) : null}
+                    {showSeasonNumber ? (
+                      <label>
+                        <span>Season</span>
+                        <input
+                          type="number"
+                          value={card.form.seasonNumber ?? ""}
+                          onChange={(e) =>
+                            updateDriveCard(card.id, (value) => ({
+                              ...value,
+                              form: {
+                                ...value.form,
+                                seasonNumber: e.target.value ? Number(e.target.value) : null,
+                              },
+                            }))
+                          }
+                        />
+                      </label>
+                    ) : null}
+                    {showEpisodeRange ? (
+                      <>
+                        <label>
+                          <span>Episode start</span>
+                          <input
+                            type="number"
+                            value={card.form.episodeRangeStart ?? ""}
+                            onChange={(e) =>
+                              updateDriveCard(card.id, (value) => ({
+                                ...value,
+                                form: {
+                                  ...value.form,
+                                  episodeRangeStart: e.target.value ? Number(e.target.value) : null,
+                                },
+                              }))
+                            }
+                          />
+                        </label>
+                        <label>
+                          <span>Episode end</span>
+                          <input
+                            type="number"
+                            value={card.form.episodeRangeEnd ?? ""}
+                            onChange={(e) =>
+                              updateDriveCard(card.id, (value) => ({
+                                ...value,
+                                form: {
+                                  ...value.form,
+                                  episodeRangeEnd: e.target.value ? Number(e.target.value) : null,
+                                },
+                              }))
+                            }
+                          />
+                        </label>
+                      </>
+                    ) : null}
+                  </div>
+                  <button
+                    className="primary-button"
+                    disabled={busyAction !== null || !configReady || makemkvBlocking}
+                    onClick={() =>
+                      void runAction(`Starting pipeline (${card.form.opticalDrive ?? `Drive ${index + 1}`})`, async () => {
+                        const latestCard = driveCardsRef.current.find((entry) => entry.id === card.id) ?? card;
+                        const jobId = await startPipeline(normalizeStartRequest(latestCard.form));
+                        setSelectedJobId(jobId);
+                      })
                     }
                   >
-                    <option value="full_season">Full season</option>
-                    <option value="partial_season">Partial season</option>
-                    <option value="special">Special</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                </label>
-            ) : null}
-            {showMovieMode ? (
-              <label>
-                <span>Movie mode</span>
-                <select
-                  value={form.movieMode ?? "single"}
-                  onChange={(e) =>
-                    setForm((v) => ({
-                      ...v,
-                      movieMode: e.target.value as "single" | "double_feature" | "trilogy",
-                    }))
-                  }
-                >
-                  <option value="single">Single</option>
-                  <option value="double_feature">Double Feature</option>
-                  <option value="trilogy">Trilogy</option>
-                </select>
-              </label>
-            ) : null}
-            {showSeasonNumber ? (
-              <label>
-                <span>Season</span>
-                <input
-                  type="number"
-                  value={form.seasonNumber ?? ""}
-                  onChange={(e) =>
-                    setForm((v) => ({
-                      ...v,
-                      seasonNumber: e.target.value ? Number(e.target.value) : null,
-                    }))
-                  }
-                />
-              </label>
-            ) : null}
-            {showEpisodeRange ? (
-              <>
-                <label>
-                  <span>Episode start</span>
-                  <input
-                    type="number"
-                    value={form.episodeRangeStart ?? ""}
-                    onChange={(e) =>
-                      setForm((v) => ({
-                        ...v,
-                        episodeRangeStart: e.target.value ? Number(e.target.value) : null,
-                      }))
-                    }
-                  />
-                </label>
-                <label>
-                  <span>Episode end</span>
-                  <input
-                    type="number"
-                    value={form.episodeRangeEnd ?? ""}
-                    onChange={(e) =>
-                      setForm((v) => ({
-                        ...v,
-                        episodeRangeEnd: e.target.value ? Number(e.target.value) : null,
-                      }))
-                    }
-                  />
-                </label>
-              </>
-            ) : null}
+                    Start End-to-End
+                  </button>
+                  {card.continuousStatus ? <p className="continuous-status">{card.continuousStatus}</p> : null}
+                </div>
+              );
+            })}
           </div>
-          <button
-            className="primary-button"
-            disabled={busyAction !== null}
-            onClick={() =>
-              void runAction("Starting pipeline", async () => {
-                const jobId = await startPipeline(normalizeStartRequest(form));
-                setSelectedJobId(jobId);
-              })
-            }
-          >
-            Start End-to-End
-          </button>
-          {continuousStatus ? <p className="continuous-status">{continuousStatus}</p> : null}
         </section>
 
         <section className="jobs-card">
@@ -1109,6 +1479,9 @@ export default function App() {
             <h2>Jobs</h2>
             <span>{jobs.length}</span>
           </div>
+          {!configReady ? (
+            <div className="empty-state">Complete setup in Settings before jobs and disc actions will run.</div>
+          ) : null}
           <div className="job-list">
             {jobs.map((job) => (
               <button
@@ -1122,6 +1495,7 @@ export default function App() {
                 </div>
                 <div className="job-row-meta">
                   <span>{job.media_type.toUpperCase()}</span>
+                  <span>{job.optical_drive ? `Drive ${job.optical_drive}` : "Auto drive"}</span>
                   <span>{job.current_stage ?? job.status}</span>
                   <span>{formatRelativeTime(job.updated_at)}</span>
                 </div>
@@ -1218,6 +1592,29 @@ export default function App() {
         ) : null}
 
         {error ? <div className="error-banner">{error}</div> : null}
+        {showMakemkvBanner ? (
+          <div className={`review-banner ${makemkvStatus?.level === "error" ? "review-banner-danger" : ""}`}>
+            <div>
+              <strong>{makemkvStatus?.level === "error" ? "MakeMKV needs attention" : "MakeMKV beta key warning"}</strong>
+              <p>{makemkvStatus?.message}</p>
+              {makemkvExpiryLabel ? <p>Published beta key expiry: {makemkvExpiryLabel}</p> : null}
+              {makemkvStatus?.buildVersion ? <p>Installed MakeMKV build: {makemkvStatus.buildVersion}</p> : null}
+              {makemkvStatus?.details?.map((detail, index) => (
+                <p key={`makemkv-detail-${index}`}>{detail}</p>
+              ))}
+            </div>
+            <div className="review-banner-actions">
+              {makemkvStatus?.sourceUrl ? (
+                <button disabled={busyAction !== null} onClick={() => void openPath(makemkvStatus.sourceUrl!)}>
+                  Open Beta Key Page
+                </button>
+              ) : null}
+              <button disabled={busyAction !== null} onClick={() => void loadConfigState()}>
+                Refresh Status
+              </button>
+            </div>
+          </div>
+        ) : null}
         {reviewState?.rip?.needed ? (
           <div className="review-banner review-banner-danger">
             <div>
@@ -1280,6 +1677,9 @@ export default function App() {
         ) : null}
 
         <div className="tabs">
+          <button className={showSettingsTab ? "active" : ""} onClick={() => setActiveTab("settings")}>
+            Settings
+          </button>
           <button className={activeTab === "overview" ? "active" : ""} onClick={() => setActiveTab("overview")}>
             Overview
           </button>
@@ -1294,7 +1694,186 @@ export default function App() {
           </button>
         </div>
 
-        {activeTab === "overview" && snapshot ? (
+        {showSettingsTab ? (
+          <section className="panel settings-panel">
+            <div className="section-header">
+              <div>
+                <h3>{configReady ? "Settings" : "First-run setup"}</h3>
+                <p>{configState?.configPath ?? "Loading config path..."}</p>
+              </div>
+              <span className={`status-pill status-${configReady ? "done" : "error"}`}>{configReady ? "ready" : "setup required"}</span>
+            </div>
+            {configLoading ? (
+              <div className="empty-state">Loading configuration…</div>
+            ) : (
+              <>
+                <div className={`review-banner ${configReady ? "" : "review-banner-danger"}`}>
+                  <div>
+                    <strong>{configState?.validation.ok ? "Configuration looks ready" : "Configuration needs attention"}</strong>
+                    <p>{configState?.validation.message ?? "Unable to validate configuration."}</p>
+                  </div>
+                  <div className="review-banner-actions">
+                    <button disabled={busyAction !== null} onClick={() => void autodetectConfig()}>
+                      Auto-detect
+                    </button>
+                  </div>
+                </div>
+                {showMakemkvBanner ? (
+                  <div className={`review-banner ${makemkvStatus?.level === "error" ? "review-banner-danger" : ""}`}>
+                    <div>
+                      <strong>{makemkvStatus?.level === "error" ? "MakeMKV needs attention" : "MakeMKV beta key warning"}</strong>
+                      <p>{makemkvStatus?.message}</p>
+                      {makemkvExpiryLabel ? <p>Published beta key expiry: {makemkvExpiryLabel}</p> : null}
+                    </div>
+                    <div className="review-banner-actions">
+                      {makemkvStatus?.sourceUrl ? (
+                        <button disabled={busyAction !== null} onClick={() => void openPath(makemkvStatus.sourceUrl!)}>
+                          Open Beta Key Page
+                        </button>
+                      ) : null}
+                      <button disabled={busyAction !== null} onClick={() => void loadConfigState()}>
+                        Refresh Status
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                <div className="panel-grid">
+                  <section className="panel">
+                    <div className="section-header">
+                      <h3>Required settings</h3>
+                    </div>
+                    <div className="form-grid">
+                      <label>
+                        <span>TMDB API key</span>
+                        <input
+                          value={configDraft.tmdb_api_key ?? ""}
+                          onChange={(e) => setConfigDraft((value) => ({ ...value, tmdb_api_key: e.target.value }))}
+                        />
+                      </label>
+                      <label>
+                        <span>MakeMKV path</span>
+                        <input
+                          value={configDraft.makemkv_path ?? ""}
+                          onChange={(e) => setConfigDraft((value) => ({ ...value, makemkv_path: e.target.value }))}
+                        />
+                        <button type="button" onClick={() => void pickConfigPath("makemkv_path", "file", "Select MakeMKV executable")}>
+                          Browse
+                        </button>
+                      </label>
+                      <label>
+                        <span>FFmpeg path</span>
+                        <input
+                          value={configDraft.ffmpeg_path ?? ""}
+                          onChange={(e) => setConfigDraft((value) => ({ ...value, ffmpeg_path: e.target.value }))}
+                        />
+                        <button type="button" onClick={() => void pickConfigPath("ffmpeg_path", "file", "Select FFmpeg executable")}>
+                          Browse
+                        </button>
+                      </label>
+                      <label>
+                        <span>FFprobe path</span>
+                        <input
+                          value={configDraft.ffprobe_path ?? ""}
+                          onChange={(e) => setConfigDraft((value) => ({ ...value, ffprobe_path: e.target.value }))}
+                        />
+                        <button type="button" onClick={() => void pickConfigPath("ffprobe_path", "file", "Select FFprobe executable")}>
+                          Browse
+                        </button>
+                      </label>
+                      <label>
+                        <span>Staging root</span>
+                        <input
+                          value={configDraft.staging_root ?? ""}
+                          onChange={(e) => setConfigDraft((value) => ({ ...value, staging_root: e.target.value }))}
+                        />
+                        <button type="button" onClick={() => void pickConfigPath("staging_root", "directory", "Select staging folder")}>
+                          Browse
+                        </button>
+                      </label>
+                      <label>
+                        <span>NAS root</span>
+                        <input
+                          value={configDraft.nas_root ?? ""}
+                          onChange={(e) => setConfigDraft((value) => ({ ...value, nas_root: e.target.value }))}
+                        />
+                        <button type="button" onClick={() => void pickConfigPath("nas_root", "directory", "Select NAS/library root")}>
+                          Browse
+                        </button>
+                      </label>
+                    </div>
+                  </section>
+                  <section className="panel">
+                    <div className="section-header">
+                      <h3>Optional defaults</h3>
+                    </div>
+                    <div className="form-grid">
+                      <label>
+                        <span>Default order mode</span>
+                        <select
+                          value={configDraft.default_order_mode ?? "aired"}
+                          onChange={(e) => setConfigDraft((value) => ({ ...value, default_order_mode: e.target.value }))}
+                        >
+                          <option value="aired">Aired</option>
+                          <option value="dvd">DVD</option>
+                          <option value="absolute">Absolute</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>Collision policy</span>
+                        <select
+                          value={configDraft.collision_policy ?? "skip"}
+                          onChange={(e) => setConfigDraft((value) => ({ ...value, collision_policy: e.target.value }))}
+                        >
+                          <option value="skip">Skip</option>
+                          <option value="overwrite">Overwrite</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div className="artifact-list">
+                      <div className="artifact-row">
+                        <div>
+                          <strong>MakeMKV</strong>
+                          <p>{configState?.dependencies.makemkv.path || "No path set"}</p>
+                        </div>
+                        <span className={`status-pill status-${configState?.dependencies.makemkv.exists ? "done" : "error"}`}>
+                          {configState?.dependencies.makemkv.exists ? "found" : "missing"}
+                        </span>
+                      </div>
+                      <div className="artifact-row">
+                        <div>
+                          <strong>FFmpeg</strong>
+                          <p>{configState?.dependencies.ffmpeg.path || "No path set"}</p>
+                        </div>
+                        <span className={`status-pill status-${configState?.dependencies.ffmpeg.exists ? "done" : "error"}`}>
+                          {configState?.dependencies.ffmpeg.exists ? "found" : "missing"}
+                        </span>
+                      </div>
+                      <div className="artifact-row">
+                        <div>
+                          <strong>FFprobe</strong>
+                          <p>{configState?.dependencies.ffprobe.path || "No path set"}</p>
+                        </div>
+                        <span className={`status-pill status-${configState?.dependencies.ffprobe.exists ? "done" : "error"}`}>
+                          {configState?.dependencies.ffprobe.exists ? "found" : "missing"}
+                        </span>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+                <div className="modal-actions">
+                  <button disabled={busyAction !== null} onClick={() => void loadConfigState()}>
+                    Reload
+                  </button>
+                  <button className="primary-button" disabled={busyAction !== null} onClick={() => void saveConfigFromDraft()}>
+                    Save settings
+                  </button>
+                </div>
+              </>
+            )}
+          </section>
+        ) : null}
+
+        {activeTab === "overview" && snapshot && !showSettingsTab ? (
           <div className="panel-grid">
             <section className="panel metrics">
               <div className="metric-card">
@@ -1428,7 +2007,7 @@ export default function App() {
           </div>
         ) : null}
 
-        {activeTab === "activity" && snapshot ? (
+        {activeTab === "activity" && snapshot && !showSettingsTab ? (
           <section className="panel">
             <div className="section-header">
               <h3>Recent activity</h3>
@@ -1452,7 +2031,7 @@ export default function App() {
           </section>
         ) : null}
 
-        {activeTab === "artifacts" && snapshot ? (
+        {activeTab === "artifacts" && snapshot && !showSettingsTab ? (
           <section className="panel">
             <div className="section-header">
               <h3>Artifacts</h3>
@@ -1494,7 +2073,7 @@ export default function App() {
           </section>
         ) : null}
 
-        {activeTab === "json" && snapshot ? (
+        {activeTab === "json" && snapshot && !showSettingsTab ? (
           <section className="panel">
             <div className="section-header">
               <h3>Raw job snapshot</h3>

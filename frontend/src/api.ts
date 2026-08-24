@@ -1,16 +1,40 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { DiscDrive, JobSnapshot, JobSummary, StartJobRequest } from "./types";
+import type { DiscDrive, JobSnapshot, JobSummary, RuntimeConfigState, StartJobRequest } from "./types";
 
 export async function listJobs(): Promise<JobSummary[]> {
   return invoke<JobSummary[]>("list_jobs");
+}
+
+export async function getRuntimeConfigState(): Promise<RuntimeConfigState> {
+  return invoke<RuntimeConfigState>("get_runtime_config_state");
+}
+
+export async function saveRuntimeConfig(config: Record<string, unknown>): Promise<RuntimeConfigState> {
+  return invoke<RuntimeConfigState>("save_runtime_config", { config });
+}
+
+export async function autodetectRuntimeConfig(): Promise<RuntimeConfigState> {
+  return invoke<RuntimeConfigState>("autodetect_runtime_config");
+}
+
+export async function browseFilePath(title: string, initialPath?: string | null): Promise<string | null> {
+  return invoke<string | null>("browse_file_path", { title, initialPath });
+}
+
+export async function browseDirectoryPath(title: string, initialPath?: string | null): Promise<string | null> {
+  return invoke<string | null>("browse_directory_path", { title, initialPath });
 }
 
 export async function getJobSnapshot(jobId: string): Promise<JobSnapshot> {
   return invoke<JobSnapshot>("job_snapshot", { jobId });
 }
 
-export async function detectDisc(): Promise<DiscDrive | null> {
-  return invoke<DiscDrive | null>("detect_disc");
+export async function listDiscDrives(): Promise<DiscDrive[]> {
+  return invoke<DiscDrive[]>("list_disc_drives");
+}
+
+export async function detectDisc(preferredDrive?: string | null): Promise<DiscDrive | null> {
+  return invoke<DiscDrive | null>("detect_disc", { preferredDrive });
 }
 
 export async function startPipeline(request: StartJobRequest): Promise<string> {

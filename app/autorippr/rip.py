@@ -1,10 +1,13 @@
+import calendar
+import csv
 import json
 import platform
 import re
 import subprocess
-import csv
 import time
-from datetime import datetime, timezone
+import urllib.error
+import urllib.request
+from datetime import date, datetime, timezone
 from io import StringIO
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +19,8 @@ from .state import append_job_log, get_job
 
 
 log = get_logger("rip")
+
+MAKEMKV_BETA_KEY_URL = "https://forum.makemkv.com/forum/viewtopic.php?f=5&t=1053"
 
 
 class RipError(RuntimeError):
@@ -82,10 +87,95 @@ def discover_optical_drives() -> list[dict[str, Any]]:
     return results
 
 
+def get_makemkv_status(makemkv_path: str) -> dict[str, Any]:
+    checked_at = datetime.now(timezone.utc).isoformat()
+    resolved = _resolve_makemkv_cli_path(makemkv_path)
+    if not makemkv_path.strip():
+        return {
+            "level": "ok",
+            "message": "",
+            "details": [],
+            "build_version": None,
+            "can_rip": None,
+            "beta_key_expires_at": None,
+            "days_until_expiry": None,
+            "checked_at": checked_at,
+            "source_url": MAKEMKV_BETA_KEY_URL,
+        }
+
+    if not resolved.exists():
+        return {
+            "level": "error",
+            "message": f"MakeMKV executable not found: {makemkv_path}",
+            "details": [],
+            "build_version": None,
+            "can_rip": False,
+            "beta_key_expires_at": None,
+            "days_until_expiry": None,
+            "checked_at": checked_at,
+            "source_url": MAKEMKV_BETA_KEY_URL,
+        }
+
+    probe = _probe_makemkv_local_status(resolved)
+    beta_expiry = _fetch_makemkv_beta_key_expiry()
+    details = list(probe.get("details") or [])
+    level = "ok"
+    message = ""
+    can_rip = True
+
+    if probe.get("issue") == "expired":
+        level = "error"
+        can_rip = False
+        message = (
+            "MakeMKV cannot rip because its beta key expired or the installed version is too old. "
+            "Update MakeMKV or enter a valid registration key."
+        )
+    elif probe.get("issue") == "probe_failed":
+        level = "warning"
+        can_rip = None
+        message = "Could not verify MakeMKV rip readiness automatically."
+
+    days_until_expiry = beta_expiry.get("days_until_expiry") if beta_expiry else None
+    beta_key_expires_at = beta_expiry.get("beta_key_expires_at") if beta_expiry else None
+    if beta_expiry and days_until_expiry is not None:
+        if days_until_expiry < 0:
+            if level != "error":
+                level = "warning"
+                message = "The published MakeMKV beta key is past its listed expiry date. Refresh your beta key if you rely on it."
+            details.append(f"Published beta key expiry: {beta_key_expires_at}")
+        elif days_until_expiry <= 14 and level == "ok":
+            level = "warning"
+            if days_until_expiry == 0:
+                message = "The published MakeMKV beta key expires today."
+            elif days_until_expiry == 1:
+                message = "The published MakeMKV beta key expires in 1 day."
+            else:
+                message = f"The published MakeMKV beta key expires in {days_until_expiry} days."
+            details.append(f"Published beta key expiry: {beta_key_expires_at}")
+    elif probe.get("online_error"):
+        details.append(f"Could not refresh beta-key expiry info: {probe['online_error']}")
+
+    if level == "ok":
+        message = "MakeMKV looks ready."
+
+    return {
+        "level": level,
+        "message": message,
+        "details": details,
+        "build_version": probe.get("build_version"),
+        "can_rip": can_rip,
+        "beta_key_expires_at": beta_key_expires_at,
+        "days_until_expiry": days_until_expiry,
+        "checked_at": checked_at,
+        "source_url": MAKEMKV_BETA_KEY_URL,
+    }
+
+
 def execute_rip_job(
     conn,
     cfg: AppConfig,
     job_id: str,
+    optical_drive: str | None = None,
     disc_index: int = 0,
     mock: bool = False,
 ) -> dict[str, Any]:
@@ -103,18 +193,31 @@ def execute_rip_job(
         rip_log_text = "MOCK RIP MODE\nCreated fake MKV files for validation.\n"
         disc_info_by_title: dict[int, dict[str, Any]] = {}
     else:
+        source_spec = _build_makemkv_source_spec(optical_drive, disc_index)
+        _ensure_drive_available(conn, job_id, optical_drive)
+        removed = _clear_stale_rip_output(rip_output_dir)
+        if removed:
+            append_job_log(
+                conn=conn,
+                job_id=job_id,
+                level="WARNING",
+                message=f"Removed {removed} stale rip output file(s) before retrying MakeMKV.",
+                from_status=None,
+                to_status=None,
+            )
+            conn.commit()
         append_job_log(
             conn=conn,
             job_id=job_id,
             level="INFO",
-            message="Starting MakeMKV disc-info scan.",
+            message=f"Starting MakeMKV disc-info scan{f' for {optical_drive}' if optical_drive else ''}.",
             from_status=None,
             to_status=None,
         )
         conn.commit()
         disc_info_text, disc_info_by_title = _read_makemkv_disc_info(
             makemkv_path=cfg.makemkv_path,
-            disc_index=disc_index,
+            source_spec=source_spec,
             timeout_seconds=min(cfg.rip_timeout_seconds, 45),
         )
         if disc_info_text:
@@ -142,7 +245,7 @@ def execute_rip_job(
             conn=conn,
             job_id=job_id,
             level="INFO",
-            message=f"Starting MakeMKV rip to {rip_output_dir}",
+            message=f"Starting MakeMKV rip{f' from {optical_drive}' if optical_drive else ''} to {rip_output_dir}",
             from_status=None,
             to_status=None,
         )
@@ -153,15 +256,12 @@ def execute_rip_job(
             makemkv_path=cfg.makemkv_path,
             output_dir=rip_output_dir,
             log_path=makemkv_log_path,
-            disc_index=disc_index,
+            source_spec=source_spec,
             timeout_seconds=cfg.rip_timeout_seconds,
         )
         log_already_written = True
         if exit_code != 0:
-            raise RipError(
-                "MakeMKV failed with non-zero exit code. "
-                f"See log: {makemkv_log_path}"
-            )
+            raise RipError(_describe_makemkv_failure(rip_log_text, makemkv_log_path))
         mkv_files = sorted(rip_output_dir.glob("*.mkv"))
 
     if not mkv_files:
@@ -280,7 +380,7 @@ def _run_makemkv_rip_streaming(
     makemkv_path: str,
     output_dir: Path,
     log_path: Path,
-    disc_index: int,
+    source_spec: str,
     timeout_seconds: int,
 ) -> tuple[str, int]:
     makemkv = _resolve_makemkv_cli_path(makemkv_path)
@@ -292,7 +392,7 @@ def _run_makemkv_rip_streaming(
         "-r",
         "--progress=-same",
         "mkv",
-        f"disc:{disc_index}",
+        source_spec,
         "all",
         str(output_dir),
     ]
@@ -330,7 +430,125 @@ def _run_makemkv_rip_streaming(
     except OSError as exc:
         raise RipError(f"Failed to execute MakeMKV: {exc}") from exc
 
-    return "", exit_code
+    log_text = ""
+    try:
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        log_text = ""
+    return log_text, exit_code
+
+
+def _describe_makemkv_failure(log_text: str, log_path: Path) -> str:
+    lowered = log_text.lower()
+    if "version is too old" in lowered or "temporary key has expired" in lowered:
+        return (
+            "MakeMKV cannot rip because its beta key expired or the installed version is too old. "
+            f"Update MakeMKV or enter a valid registration key, then retry. See log: {log_path}"
+        )
+    return f"MakeMKV failed with non-zero exit code. See log: {log_path}"
+
+
+def _probe_makemkv_local_status(makemkv: Path) -> dict[str, Any]:
+    probe_root = Path.home()
+    if not probe_root.exists():
+        probe_root = Path.cwd()
+    cmd = [str(makemkv), "-r", "info", f"file:{probe_root}"]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "issue": "probe_failed",
+            "details": ["MakeMKV readiness probe timed out."],
+            "build_version": None,
+        }
+    except OSError as exc:
+        return {
+            "issue": "probe_failed",
+            "details": [f"MakeMKV readiness probe failed: {exc}"],
+            "build_version": None,
+        }
+
+    combined = f"{proc.stdout}\n{proc.stderr}".strip()
+    lowered = combined.lower()
+    version_match = re.search(r"MakeMKV v([0-9.]+)", combined)
+    details: list[str] = []
+    if proc.returncode not in (0, 10):
+        details.append(f"Local MakeMKV probe exited with code {proc.returncode}.")
+    if "version is too old" in lowered or "temporary key has expired" in lowered:
+        return {
+            "issue": "expired",
+            "details": details,
+            "build_version": version_match.group(1) if version_match else None,
+        }
+    return {
+        "issue": None,
+        "details": details,
+        "build_version": version_match.group(1) if version_match else None,
+    }
+
+
+def _fetch_makemkv_beta_key_expiry() -> dict[str, Any] | None:
+    request = urllib.request.Request(
+        MAKEMKV_BETA_KEY_URL,
+        headers={"User-Agent": "Auto-Ripper/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = response.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return None
+
+    parsed = _parse_beta_expiry_date(payload)
+    if parsed is None:
+        return None
+
+    today = datetime.now(timezone.utc).date()
+    return {
+        "beta_key_expires_at": datetime.combine(parsed, datetime.min.time(), tzinfo=timezone.utc).isoformat(),
+        "days_until_expiry": (parsed - today).days,
+    }
+
+
+def _parse_beta_expiry_date(payload: str) -> date | None:
+    end_of_month = re.search(
+        r"valid until end of ([A-Za-z]+)\s+(\d{4})",
+        payload,
+        flags=re.IGNORECASE,
+    )
+    if end_of_month:
+        month_name = end_of_month.group(1)
+        year = int(end_of_month.group(2))
+        month = _month_name_to_number(month_name)
+        if month is None:
+            return None
+        day = calendar.monthrange(year, month)[1]
+        return date(year, month, day)
+
+    exact_day = re.search(
+        r"valid until ([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})",
+        payload,
+        flags=re.IGNORECASE,
+    )
+    if exact_day:
+        month = _month_name_to_number(exact_day.group(1))
+        if month is None:
+            return None
+        return date(int(exact_day.group(3)), month, int(exact_day.group(2)))
+    return None
+
+
+def _month_name_to_number(value: str) -> int | None:
+    normalized = value.strip().lower()
+    for idx, month_name in enumerate(calendar.month_name):
+        if month_name and month_name.lower() == normalized:
+            return idx
+    return None
 
 
 def _emit_rip_heartbeat(conn, job_id: str, output_dir: Path) -> None:
@@ -369,13 +587,13 @@ def _job_is_still_ripping(conn, job_id: str) -> bool:
 
 def _read_makemkv_disc_info(
     makemkv_path: str,
-    disc_index: int,
+    source_spec: str,
     timeout_seconds: int,
 ) -> tuple[str, dict[int, dict[str, Any]]]:
     makemkv = _resolve_makemkv_cli_path(makemkv_path)
     if not makemkv.exists():
         return "", {}
-    cmd = [str(makemkv), "-r", "info", f"disc:{disc_index}"]
+    cmd = [str(makemkv), "-r", "info", source_spec]
     try:
         proc = subprocess.run(
             cmd,
@@ -419,6 +637,45 @@ def _resolve_makemkv_cli_path(makemkv_path: str) -> Path:
         if cpath.exists():
             return cpath
     return configured
+
+
+def _build_makemkv_source_spec(optical_drive: str | None, disc_index: int) -> str:
+    normalized = (optical_drive or "").strip().rstrip("\\/")
+    if normalized:
+        return f"dev:{normalized}"
+    return f"disc:{disc_index}"
+
+
+def _ensure_drive_available(conn, job_id: str, optical_drive: str | None) -> None:
+    normalized = (optical_drive or "").strip().upper()
+    if not normalized:
+        return
+    conflict = conn.execute(
+        """
+        SELECT id
+        FROM jobs
+        WHERE id != ? AND status = 'ripping' AND UPPER(COALESCE(optical_drive, '')) = ?
+        LIMIT 1
+        """,
+        (job_id, normalized),
+    ).fetchone()
+    if conflict:
+        raise RipError(f"Optical drive {normalized} is already being used by job {conflict['id']}.")
+
+
+def _clear_stale_rip_output(rip_output_dir: Path) -> int:
+    removed = 0
+    if not rip_output_dir.exists():
+        return removed
+    for path in rip_output_dir.iterdir():
+        if not path.is_file():
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError as exc:
+            raise RipError(f"Could not clear stale rip output file {path}: {exc}") from exc
+    return removed
 
 
 def _run_mock_rip(rip_output_dir: Path) -> list[Path]:
