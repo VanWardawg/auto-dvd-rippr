@@ -28,7 +28,12 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "renaming": {"copying", "error"},
     "copying": {"done", "error"},
     "done": set(),
-    "error": {"queued"},
+    # Retrying an errored job re-enters at the stage it failed in, rather than
+    # starting over: a transient failure late in the pipeline (an unmounted NAS
+    # during the copy) must not force a fresh rip of a disc that already
+    # succeeded. pipeline._infer_resume_stage decides which stage that is from
+    # the artifacts on record.
+    "error": {"queued", "ripping", "identifying", "mapping", "splitting", "renaming", "copying"},
 }
 
 

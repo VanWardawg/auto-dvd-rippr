@@ -32,11 +32,91 @@ def resume_incomplete_jobs(conn, cfg: AppConfig, mock_rip: bool = False) -> list
     return results
 
 
+def _resume_errored_job(conn, job) -> str:
+    """Move an errored job back to the stage it should retry from."""
+    job_id = str(job["id"])
+    stage = _infer_resume_stage(conn, job)
+    append_job_log(
+        conn,
+        job_id,
+        "INFO",
+        f"Retrying failed job from the '{stage}' stage.",
+        None,
+        None,
+    )
+    conn.commit()
+    transition_job(conn, job_id, stage)
+    return stage
+
+
+def _infer_resume_stage(conn, job) -> str:
+    """
+    Decide where a failed job should pick up, based on what it already produced.
+
+    Work already done is expensive -- a rip is tens of minutes and gigabytes --
+    so the rule is to resume at the earliest stage whose output is missing,
+    never to redo a stage whose artifacts are on record.
+    """
+    job_id = str(job["id"])
+
+    # Finalized files exist, so the rip, identification and naming all
+    # succeeded. Whatever failed, the remaining work is the copy.
+    outputs = conn.execute(
+        "SELECT COUNT(*) AS c FROM outputs WHERE job_id = ?", (job_id,)
+    ).fetchone()["c"]
+    if outputs:
+        return "copying"
+
+    if not _job_has_rip_titles(conn, job_id):
+        # Nothing was ripped; there is no shortcut to take.
+        return "queued"
+
+    selected = conn.execute(
+        "SELECT media_type FROM job_selected_media WHERE job_id = ? LIMIT 1",
+        (job_id,),
+    ).fetchone()
+    if not selected:
+        return "identifying"
+
+    media_type = str(selected["media_type"] or job["media_type"] or "tv")
+    if media_type == "movie":
+        return "renaming"
+
+    mappings = conn.execute(
+        "SELECT COUNT(*) AS c FROM episode_mappings WHERE job_id = ?", (job_id,)
+    ).fetchone()["c"]
+    if not mappings:
+        return "mapping"
+
+    needs_split = conn.execute(
+        "SELECT COUNT(*) AS c FROM episode_mappings WHERE job_id = ? AND needs_split = 1",
+        (job_id,),
+    ).fetchone()["c"]
+    if needs_split:
+        unfinished_splits = conn.execute(
+            "SELECT COUNT(*) AS c FROM split_plans WHERE job_id = ? AND status != 'done'",
+            (job_id,),
+        ).fetchone()["c"]
+        no_plans = conn.execute(
+            "SELECT COUNT(*) AS c FROM split_plans WHERE job_id = ?", (job_id,)
+        ).fetchone()["c"] == 0
+        if unfinished_splits or no_plans:
+            return "splitting"
+
+    return "renaming"
+
+
 def run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = False) -> dict[str, Any]:
     job = get_job(conn, job_id)
     if not job:
         raise RuntimeError(f"Job not found: {job_id}")
     status = str(job["status"])
+
+    if status == "error":
+        # Without this, resuming an errored job matched no stage below and
+        # returned silently, so the UI's Resume button did nothing at all.
+        status = _resume_errored_job(conn, job)
+        job = get_job(conn, job_id) or job
 
     try:
         if status == "queued":

@@ -38,6 +38,25 @@ Branch: `feat/hardening-and-rip-improvements` (not yet merged to `main`)
 
 ---
 
+## Next up (found by running the app on real discs)
+
+- **Checksum during the copy, not after.** `transfer._sha256` re-reads the
+  finished file back over the network to verify it, roughly doubling transfer
+  time -- a 5.5 GB movie copies at ~92 MB/s and then spends another ~2 minutes
+  being read back over SMB. Hashing the bytes as they stream through the copy
+  loop gives the same guarantee for free.
+- **Probe the NAS before finalizing.** `transfer_job_outputs` discovers an
+  unreachable NAS at `mkdir` time, after the rip and rename have already run.
+  A reachability check at the start of the copy stage would turn that into a
+  clear "NAS unavailable, reconnect and retry" rather than an error state.
+- **Clear the progress row when artifacts are cleared.**
+  `clear_job_local_artifacts` and `clear_job_output_artifacts` leave the
+  `job_progress` row behind, so the UI can briefly show stale rip progress.
+  Cosmetic.
+- **`run-tauri.mjs` is broken.** It spawns a bare `tauri` from `~/.cargo/bin`,
+  which is not installed; `npm run tauri -- dev` fails. Use `npx tauri dev`
+  until it falls back to the local CLI in devDependencies.
+
 ## Not started
 
 - **Content Security Policy.** `tauri.conf.json` sets `"csp": null`. A
@@ -86,3 +105,23 @@ Branch: `feat/hardening-and-rip-improvements` (not yet merged to `main`)
   scan timeout, real MakeMKV robot progress parsing, and optional auto-eject.
 
 Test suite grew from 9 to 31 cases.
+
+### 2026-08-24 — bugs found by running it on real discs
+
+- **`delete_job` was never registered.** `#[tauri::command(name = "...")]` is
+  not a valid attribute and is silently ignored, so the command registered as
+  `delete_job_cmd` while the frontend invoked `delete_job`. Added
+  `check-commands.mjs`, which cross-checks every `invoke()` against
+  `generate_handler![]` in CI -- neither tsc nor cargo can catch this.
+- **Jobs aimed at an empty drive died opaquely.** `_ensure_drive_available`
+  never checked for a disc. Now it does, and names the drive that has one;
+  `_describe_makemkv_failure` translates MakeMKV's exit codes using its own
+  `DRV:` lines.
+- **Deleting a job failed on a foreign key.** `delete_job` used a hardcoded
+  list of 8 child tables; 10 reference `jobs`. Now derived from
+  `PRAGMA foreign_key_list`.
+- **Resume did nothing on errored jobs.** `run_pipeline_for_job` had no branch
+  for `error`, and `error -> queued` would have re-ripped the disc. Errored
+  jobs now resume at the stage their artifacts justify.
+
+Test suite grew from 31 to 55 cases.
