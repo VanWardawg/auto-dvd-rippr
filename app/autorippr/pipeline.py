@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +10,7 @@ from .rip import RipError, execute_rip_job, recover_completed_rip
 from .splitter import SplitError, execute_splits, plan_splits_for_job
 from .state import InvalidTransitionError, append_job_log, get_job, transition_job
 from .tmdb import TmdbError, identify_job_with_tmdb
-from .transfer import TransferError, transfer_job_outputs
+from .transfer import TransferError, ensure_nas_available, transfer_job_outputs
 
 
 def resume_incomplete_jobs(conn, cfg: AppConfig, mock_rip: bool = False) -> list[dict[str, Any]]:
@@ -337,9 +338,61 @@ def _job_has_rip_titles(conn, job_id: str) -> bool:
     return bool(row and int(row["c"] or 0) > 0)
 
 
+# How long the pre-rip courtesy check may take. Probing a disconnected SMB
+# share blocks on a network timeout that can run to tens of seconds, and
+# ripping is entirely local -- it must never wait on the NAS.
+NAS_PREFLIGHT_TIMEOUT_SECONDS = 2.0
+
+
+def _warn_if_nas_unreachable(conn, cfg: AppConfig, job_id: str) -> None:
+    """
+    Mention up front if the destination is missing. Never block the rip.
+
+    Ripping does not need the NAS, so this is advisory only: it warns, and the
+    rip proceeds regardless. The share may well come back before the copy
+    stage, and if it does not, the job stops at 'copying' with a clear message
+    and resumes from there once the user reconnects -- no re-rip.
+
+    The probe runs on a daemon thread with a short deadline so a dead share
+    cannot stall the start of a rip. An inconclusive probe says nothing rather
+    than guessing.
+    """
+    result: list[str] = []
+
+    def probe() -> None:
+        try:
+            ensure_nas_available(cfg)
+        except TransferError as exc:
+            result.append(str(exc))
+        except Exception:  # never let a probe failure touch the rip
+            pass
+
+    worker = threading.Thread(target=probe, daemon=True)
+    worker.start()
+    worker.join(NAS_PREFLIGHT_TIMEOUT_SECONDS)
+
+    if worker.is_alive() or not result:
+        # Timed out, or the NAS is fine. Either way, get on with the rip.
+        return
+
+    append_job_log(
+        conn,
+        job_id,
+        "WARNING",
+        (
+            "NAS is not reachable right now. The rip will continue -- it is local -- "
+            f"but the copy will stop until the share returns. {result[0]}"
+        ),
+        None,
+        None,
+    )
+    conn.commit()
+
+
 def _execute_rip_and_advance(conn, cfg: AppConfig, job_id: str, *, mock_rip: bool) -> str:
     recovered = recover_completed_rip(conn, cfg, job_id)
     if recovered is None:
+        _warn_if_nas_unreachable(conn, cfg, job_id)
         job = get_job(conn, job_id)
         execute_rip_job(
             conn,

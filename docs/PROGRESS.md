@@ -40,15 +40,6 @@ Branch: `feat/hardening-and-rip-improvements` (not yet merged to `main`)
 
 ## Next up (found by running the app on real discs)
 
-- **Checksum during the copy, not after.** `transfer._sha256` re-reads the
-  finished file back over the network to verify it, roughly doubling transfer
-  time -- a 5.5 GB movie copies at ~92 MB/s and then spends another ~2 minutes
-  being read back over SMB. Hashing the bytes as they stream through the copy
-  loop gives the same guarantee for free.
-- **Probe the NAS before finalizing.** `transfer_job_outputs` discovers an
-  unreachable NAS at `mkdir` time, after the rip and rename have already run.
-  A reachability check at the start of the copy stage would turn that into a
-  clear "NAS unavailable, reconnect and retry" rather than an error state.
 - **Clear the progress row when artifacts are cleared.**
   `clear_job_local_artifacts` and `clear_job_output_artifacts` leave the
   `job_progress` row behind, so the UI can briefly show stale rip progress.
@@ -125,3 +116,18 @@ Test suite grew from 9 to 31 cases.
   jobs now resume at the stage their artifacts justify.
 
 Test suite grew from 31 to 55 cases.
+
+### 2026-08-24 — transfer speed and failure clarity
+
+- **Checksums are computed while copying**, not by reading the finished file
+  back off the NAS. The old read-back also compared nothing -- the source was
+  never hashed -- so it was pure cost that could not detect corruption.
+  Roughly halves transfer time on a network share.
+- **`verify_transfers`** (default off) turns that read-back into a real
+  comparison against the streaming hash, so the expensive pass now buys
+  genuine end-to-end verification for anyone who wants it.
+- **`ensure_nas_available`** fails the copy stage immediately with an
+  actionable message, and logs a non-fatal warning before a rip starts, rather
+  than surfacing a raw WinError from a mkdir after the rip and rename are done.
+
+Test suite grew from 55 to 65 cases.

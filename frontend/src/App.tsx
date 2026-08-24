@@ -308,6 +308,7 @@ function buildConfigDraft(config?: Record<string, unknown> | null) {
     collision_policy: String(source.collision_policy ?? "skip"),
     rip_title_selection: String(source.rip_title_selection ?? "auto"),
     eject_after_rip: String(source.eject_after_rip ?? false),
+    verify_transfers: String(source.verify_transfers ?? false),
   };
 }
 
@@ -318,7 +319,7 @@ function buildConfigDraft(config?: Record<string, unknown> | null) {
  * back before saving -- otherwise the JSON stores "false", which is truthy on
  * the Python side.
  */
-const BOOLEAN_CONFIG_KEYS = ["eject_after_rip"];
+const BOOLEAN_CONFIG_KEYS = ["eject_after_rip", "verify_transfers"];
 
 function coerceConfigDraft(draft: Record<string, string>): Record<string, unknown> {
   const coerced: Record<string, unknown> = { ...draft };
@@ -1872,6 +1873,20 @@ export default function App() {
                           <option value="true">Eject automatically</option>
                         </select>
                         <small>Useful with continuous mode when working through a stack of discs.</small>
+                      </label>
+                      <label>
+                        <span>Verify NAS copies</span>
+                        <select
+                          value={configDraft.verify_transfers ?? "false"}
+                          onChange={(e) => setConfigDraft((value) => ({ ...value, verify_transfers: e.target.value }))}
+                        >
+                          <option value="false">Trust the copy (faster)</option>
+                          <option value="true">Read back and compare checksums</option>
+                        </select>
+                        <small>
+                          Every copy records a SHA-256 either way. Verifying reads the file back off the
+                          NAS to compare it, which roughly doubles transfer time.
+                        </small>
                       </label>
                     </div>
                     <div className="artifact-list">

@@ -12,6 +12,7 @@ that already succeeded.
 
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -292,6 +293,62 @@ class ResumeErroredJobTests(unittest.TestCase):
                 self.assertIn("nas_unavailable", job["error_message"])
             finally:
                 conn.close()
+
+
+class NasPreflightTests(unittest.TestCase):
+    """Ripping is local and must never wait on, or be blocked by, the NAS."""
+
+    def _run_probe(self, side_effect):
+        import autorippr.pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = build_config(root)
+            conn = open_db(cfg.db_path)
+            try:
+                job_id = create_job(conn, disc_label="DISC", media_type="movie")
+                conn.commit()
+                with patch.object(pipeline, "ensure_nas_available", side_effect=side_effect):
+                    started = time.monotonic()
+                    pipeline._warn_if_nas_unreachable(conn, cfg, job_id)
+                    elapsed = time.monotonic() - started
+                warnings = [
+                    r["message"]
+                    for r in conn.execute(
+                        "SELECT message FROM job_logs WHERE job_id = ? AND level = 'WARNING'",
+                        (job_id,),
+                    ).fetchall()
+                ]
+                return elapsed, warnings
+            finally:
+                conn.close()
+
+    def test_unreachable_nas_warns_without_raising(self) -> None:
+        from autorippr.transfer import TransferError
+
+        elapsed, warnings = self._run_probe(TransferError("NAS root Y:\ is not reachable."))
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("rip will continue", warnings[0])
+
+    def test_reachable_nas_says_nothing(self) -> None:
+        elapsed, warnings = self._run_probe(None)
+        self.assertEqual(warnings, [])
+
+    def test_a_hanging_probe_does_not_stall_the_rip(self) -> None:
+        """A dead SMB share blocks for tens of seconds; the rip must not wait."""
+        import autorippr.pipeline as pipeline
+
+        def hang(_cfg):
+            time.sleep(30)
+
+        elapsed, warnings = self._run_probe(hang)
+        self.assertLess(elapsed, pipeline.NAS_PREFLIGHT_TIMEOUT_SECONDS + 1.5)
+        # An inconclusive probe says nothing rather than guessing.
+        self.assertEqual(warnings, [])
+
+    def test_unexpected_probe_error_is_swallowed(self) -> None:
+        elapsed, warnings = self._run_probe(OSError("something odd"))
+        self.assertEqual(warnings, [])
 
 
 if __name__ == "__main__":

@@ -18,7 +18,40 @@ class TransferError(RuntimeError):
 INVALID_PATH_CHARS = re.compile(r'[<>:"/\\|?*]')
 
 
+def ensure_nas_available(cfg: AppConfig) -> None:
+    """
+    Fail early and clearly when the NAS is not reachable.
+
+    Without this the first sign of trouble is a mkdir deep inside the copy
+    loop, after the rip and the rename have already run -- reported as a raw
+    WinError. A disconnected mapped drive is the common case (the letter still
+    exists in the registry but resolves to nothing), and it is worth naming
+    explicitly because the fix is "reconnect it and hit Resume".
+    """
+    root_value = str(cfg.nas_root).strip()
+    if not root_value:
+        raise TransferError("No NAS root is configured. Set nas_root in Settings.")
+
+    root = Path(root_value)
+    try:
+        exists = root.exists()
+    except OSError as exc:
+        raise TransferError(
+            f"NAS root {root_value} is not reachable ({exc}). "
+            "Reconnect it and resume the job."
+        ) from exc
+
+    if not exists:
+        raise TransferError(
+            f"NAS root {root_value} is not reachable. If it is a mapped network "
+            "drive it may have been disconnected -- reconnect it and resume the job."
+        )
+    if not root.is_dir():
+        raise TransferError(f"NAS root {root_value} exists but is not a folder.")
+
+
 def transfer_job_outputs(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
+    ensure_nas_available(cfg)
     rows = conn.execute(
         """
         SELECT id, local_path, nas_path, transfer_status, transfer_attempts
@@ -85,6 +118,7 @@ def transfer_job_outputs(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
             final_dest=nas_final,
             retries=cfg.transfer_retry_count,
             backoff_seconds=cfg.transfer_backoff_seconds,
+            verify=cfg.verify_transfers,
         )
         if not ok:
             _record_failure(conn, out_id, err or "copy_failed")
@@ -126,7 +160,22 @@ def _copy_with_retry(
     final_dest: Path,
     retries: int,
     backoff_seconds: int,
+    verify: bool = False,
 ) -> tuple[bool, str | None, str | None]:
+    """
+    Copy one file to the NAS, hashing it as it streams past.
+
+    The hash used to be computed by reading the finished file back off the
+    NAS, which on a 5.5 GB movie meant pulling every byte back over SMB and
+    roughly doubling the transfer time. It also verified nothing: the source
+    was never hashed, so the digest was recorded but never compared against
+    anything, and corruption could not have been detected.
+
+    Hashing the source stream as it is copied costs nothing. When `verify` is
+    set the destination is additionally read back and *compared* to that hash,
+    so the expensive read now buys real end-to-end verification instead of
+    being pure overhead.
+    """
     last_error = None
     for attempt in range(1, max(1, retries) + 1):
         try:
@@ -135,6 +184,7 @@ def _copy_with_retry(
             total_bytes = max(1, source.stat().st_size)
             copied_bytes = 0
             chunk_size = 8 * 1024 * 1024
+            digest = hashlib.sha256()
             start = time.monotonic()
             next_heartbeat = start + 5.0
             with open(source, "rb") as src, open(temp_dest, "wb") as dst:
@@ -143,6 +193,7 @@ def _copy_with_retry(
                     if not chunk:
                         break
                     dst.write(chunk)
+                    digest.update(chunk)
                     copied_bytes += len(chunk)
                     now = time.monotonic()
                     if now >= next_heartbeat:
@@ -150,10 +201,15 @@ def _copy_with_retry(
                         rate = copied_bytes / elapsed
                         _emit_transfer_heartbeat(conn, job_id, output_id, copied_bytes, total_bytes, rate)
                         next_heartbeat = now + 5.0
+            checksum = digest.hexdigest()
             shutil.copystat(source, temp_dest)
             if temp_dest.stat().st_size != source.stat().st_size:
                 raise TransferError("size_mismatch_after_copy")
-            checksum = _sha256(temp_dest)
+            if verify:
+                _emit_transfer_verify_heartbeat(conn, job_id, copied_bytes, total_bytes)
+                written = _sha256(temp_dest)
+                if written != checksum:
+                    raise TransferError("checksum_mismatch_after_copy")
             temp_dest.replace(final_dest)
             if final_dest.stat().st_size != source.stat().st_size:
                 raise TransferError("size_mismatch_after_rename")
@@ -200,6 +256,22 @@ def _emit_transfer_heartbeat(
         rate_per_second=rate_mb_s,
         eta_seconds=remaining_seconds,
         detail=f"Copying {copied_mb:.1f} / {total_mb:.1f} MB",
+    )
+    conn.commit()
+
+
+def _emit_transfer_verify_heartbeat(conn, job_id: str, copied_bytes: int, total_bytes: int) -> None:
+    """Keep the UI honest about the read-back, which is not instant."""
+    total_mb = total_bytes / (1024 * 1024)
+    upsert_progress(
+        conn,
+        job_id,
+        stage="copying",
+        kind="copying",
+        current_units=copied_bytes / (1024 * 1024),
+        total_units=total_mb,
+        unit="mb",
+        detail=f"Verifying {total_mb:.1f} MB on the NAS",
     )
     conn.commit()
 

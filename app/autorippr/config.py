@@ -99,6 +99,11 @@ class AppConfig:
     # Eject the disc when a rip finishes, so a migration session becomes
     # "swap disc, repeat" instead of "go click something".
     eject_after_rip: bool = False
+    # Read each transferred file back off the NAS and compare it to the hash
+    # computed while copying. This is genuine end-to-end verification, but it
+    # doubles transfer time, so it is opt-in. The stored checksum is correct
+    # either way -- it is now taken from the source stream during the copy.
+    verify_transfers: bool = False
 
 
 def load_config(config_path: str) -> AppConfig:
@@ -184,5 +189,6 @@ def load_config(config_path: str) -> AppConfig:
         rip_min_title_seconds=int(merged.get("rip_min_title_seconds", 120)),
         disc_scan_timeout_seconds=int(merged.get("disc_scan_timeout_seconds", 300)),
         eject_after_rip=_as_bool(merged.get("eject_after_rip"), False),
+        verify_transfers=_as_bool(merged.get("verify_transfers"), False),
     )
 

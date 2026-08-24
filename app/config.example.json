@@ -20,5 +20,6 @@
   "rip_min_title_seconds": 120,
   "disc_scan_timeout_seconds": 300,
   "eject_after_rip": false,
+  "verify_transfers": false,
   "show_overrides": {}
 }
