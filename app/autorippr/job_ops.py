@@ -29,6 +29,49 @@ def _table_has_column(conn, table: str, column: str) -> bool:
     return any(str(r["name"]) == column for r in cols)
 
 
+# Child tables deleted in this order first, where they exist. Order matters
+# where one child references another; anything not listed here is discovered
+# and appended automatically.
+_JOB_CHILD_TABLE_ORDER = (
+    "finalized_manifests",
+    "outputs",
+    "split_plans",
+    "episode_mappings",
+    "tmdb_candidates",
+    "rip_titles",
+    "job_logs",
+    "job_selected_media",
+    "job_selected_movies",
+    "job_progress",
+)
+
+
+def _tables_referencing_jobs(conn) -> list[tuple[str, str]]:
+    """
+    Every (table, column) with a foreign key to jobs, in deletion order.
+
+    Discovered from the schema rather than hardcoded. A hardcoded list silently
+    goes stale the moment someone adds a table -- and because foreign keys are
+    enforced, the resulting failure is a bare "FOREIGN KEY constraint failed"
+    on the final DELETE, with no hint about which table was missed. That is
+    exactly how deleting a job broke when job_progress was added.
+    """
+    discovered: dict[str, str] = {}
+    for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall():
+        table = str(row["name"])
+        if table == "jobs":
+            continue
+        for fk in conn.execute(f"PRAGMA foreign_key_list({table})").fetchall():
+            if str(fk["table"]).lower() == "jobs":
+                discovered[table] = str(fk["from"])
+                break
+
+    ordered = [(t, discovered[t]) for t in _JOB_CHILD_TABLE_ORDER if t in discovered]
+    listed = {t for t, _ in ordered}
+    ordered.extend(sorted((t, c) for t, c in discovered.items() if t not in listed))
+    return ordered
+
+
 def delete_job(conn, staging_root: str, job_id: str) -> dict[str, Any]:
     exists = conn.execute("SELECT id FROM jobs WHERE id = ?", (job_id,)).fetchone()
     if not exists:
@@ -42,21 +85,9 @@ def delete_job(conn, staging_root: str, job_id: str) -> dict[str, Any]:
         for out_id in output_ids:
             conn.execute("DELETE FROM transfer_attempts WHERE output_id = ?", (out_id,))
 
-    tables_with_job_fk = [
-        "finalized_manifests",
-        "outputs",
-        "split_plans",
-        "episode_mappings",
-        "tmdb_candidates",
-        "rip_titles",
-        "job_logs",
-        "job_selected_media",
-    ]
     deleted_counts: dict[str, int] = {}
-    for table in tables_with_job_fk:
-        if not _table_has_column(conn, table, "job_id"):
-            continue
-        cur = conn.execute(f"DELETE FROM {table} WHERE job_id = ?", (job_id,))
+    for table, column in _tables_referencing_jobs(conn):
+        cur = conn.execute(f"DELETE FROM {table} WHERE {column} = ?", (job_id,))
         deleted_counts[table] = int(cur.rowcount if cur.rowcount is not None else 0)
 
     # jobs table uses primary key column "id", not "job_id".
