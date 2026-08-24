@@ -11,7 +11,7 @@ so any session can pick up mid-stream.
 
 Branch: `feat/hardening-and-rip-improvements`
 
-### Track 1 — Repo hygiene and packaging
+### Track 1 — Repo hygiene and packaging  ✅ complete
 
 - [x] Harden `.gitignore` (secrets, runtime state, build output)
 - [x] Untrack `app/config.json` so a real TMDB key cannot leak
@@ -20,8 +20,8 @@ Branch: `feat/hardening-and-rip-improvements`
 - [x] Add root `README.md`
 - [x] Add `CLAUDE.md` and this file
 - [x] Run the test suite in CI
-- [ ] Single-source the version from the git tag
-- [ ] Drop the legacy tkinter GUI and exclude Tcl/Tk from the bundle
+- [x] Single-source the version from the git tag
+- [x] Drop the legacy tkinter GUI and exclude Tcl/Tk from the bundle
 
 ### Track 2 — Ripping quality (highest user-facing value)
 

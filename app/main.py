@@ -551,8 +551,6 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline_resume = pipeline_sub.add_parser("resume-all", help="Resume all incomplete jobs")
     pipeline_resume.add_argument("--mock-rip", action="store_true")
 
-    gui = sub.add_parser("gui", help="Launch simple local GUI")
-    gui.add_argument("--refresh-seconds", type=int, default=3)
     return parser
 
 
@@ -1169,12 +1167,6 @@ def main() -> int:
             except Exception as exc:
                 print(f"Pipeline resume error: {exc}", file=sys.stderr)
                 return 11
-
-    if args.command == "gui":
-        from autorippr.ui import launch_gui
-
-        launch_gui(conn, cfg, refresh_seconds=args.refresh_seconds)
-        return 0
 
     log.error("Unknown command")
     parser.print_help()

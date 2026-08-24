@@ -38,6 +38,17 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Stamp release version
+        shell: pwsh
+        working-directory: frontend
+        run: |
+          $ref = "${{ github.ref_name }}"
+          if ($ref -match '^v\d+\.\d+\.\d+$') {
+            node ./scripts/set-version.mjs $ref
+          } else {
+            Write-Host "Ref '$ref' is not a release tag; keeping the committed version."
+          }
+
       - name: Build self-contained assets
         working-directory: frontend
         run: npm run build:self-contained

@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "build:backend": "node ./scripts/build-backend.mjs",
     "build:self-contained": "npm run build && npm run build:backend",
+    "version:set": "node ./scripts/set-version.mjs",
     "preview": "vite preview",
     "tauri": "node ./scripts/run-tauri.mjs"
   },
