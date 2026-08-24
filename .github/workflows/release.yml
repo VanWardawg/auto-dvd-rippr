@@ -38,6 +38,10 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Check Tauri command wiring
+        working-directory: frontend
+        run: npm run check:commands
+
       - name: Stamp release version
         shell: pwsh
         working-directory: frontend

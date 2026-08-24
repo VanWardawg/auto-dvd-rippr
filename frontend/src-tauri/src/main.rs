@@ -160,7 +160,7 @@ fn main() {
             clear_local_artifacts,
             rebuild_output,
             remap_remote_output,
-            delete_job_cmd,
+            delete_job,
             open_path
         ])
         .run(tauri::generate_context!())
@@ -470,8 +470,8 @@ fn remap_remote_output(job_id: String) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command(name = "delete_job")]
-fn delete_job_cmd(job_id: String) -> Result<(), String> {
+#[tauri::command]
+fn delete_job(job_id: String) -> Result<(), String> {
     let _ = run_python_text(&["job", "delete", &job_id])?;
     Ok(())
 }

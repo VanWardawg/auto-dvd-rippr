@@ -18,7 +18,10 @@ from autorippr.rip import (  # noqa: E402
     RipError,
     _build_makemkv_source_spec,
     _clear_stale_rip_output,
+    _describe_makemkv_failure,
+    _drives_with_media_from_log,
     _ensure_drive_available,
+    _no_disc_message,
     _parse_beta_expiry_date,
 )
 from autorippr.state import create_job, get_job  # noqa: E402
@@ -148,6 +151,115 @@ class RuntimeRegressionTests(unittest.TestCase):
             )
 
             self.assertFalse(review["rip"]["needed"])
+
+    def test_empty_drive_is_rejected_before_ripping(self) -> None:
+        """A job aimed at a drive with no disc must fail fast, not after a scan."""
+        drives = [
+            {"drive": "E:", "has_media": False, "volume_label": ""},
+            {"drive": "F:", "has_media": True, "volume_label": "BARBIE"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = open_db(str(tmp_path / "autorippr.db"))
+            try:
+                job_id = create_job(conn, disc_label="x", optical_drive="E:")
+                conn.commit()
+                with patch("autorippr.rip.discover_optical_drives", return_value=drives):
+                    with self.assertRaises(RipError) as ctx:
+                        _ensure_drive_available(conn, job_id, "E:")
+                message = str(ctx.exception)
+                self.assertIn("No disc detected in E:", message)
+                # The whole point: say where the disc actually is.
+                self.assertIn("F:", message)
+                self.assertIn("BARBIE", message)
+            finally:
+                conn.close()
+
+    def test_loaded_drive_passes_the_guard(self) -> None:
+        drives = [{"drive": "F:", "has_media": True, "volume_label": "BARBIE"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = open_db(str(tmp_path / "autorippr.db"))
+            try:
+                job_id = create_job(conn, disc_label="x", optical_drive="F:")
+                conn.commit()
+                with patch("autorippr.rip.discover_optical_drives", return_value=drives):
+                    _ensure_drive_available(conn, job_id, "F:")
+            finally:
+                conn.close()
+
+    def test_undetectable_drives_do_not_block_the_rip(self) -> None:
+        """If drives cannot be enumerated, let MakeMKV decide."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = open_db(str(tmp_path / "autorippr.db"))
+            try:
+                job_id = create_job(conn, disc_label="x", optical_drive="E:")
+                conn.commit()
+                with patch("autorippr.rip.discover_optical_drives", return_value=[]):
+                    _ensure_drive_available(conn, job_id, "E:")
+            finally:
+                conn.close()
+
+    def test_unknown_drive_letter_is_reported(self) -> None:
+        drives = [{"drive": "E:", "has_media": True, "volume_label": "DISC"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = open_db(str(tmp_path / "autorippr.db"))
+            try:
+                job_id = create_job(conn, disc_label="x", optical_drive="Q:")
+                conn.commit()
+                with patch("autorippr.rip.discover_optical_drives", return_value=drives):
+                    with self.assertRaises(RipError) as ctx:
+                        _ensure_drive_available(conn, job_id, "Q:")
+                self.assertIn("was not found", str(ctx.exception))
+            finally:
+                conn.close()
+
+    def test_failed_to_open_disc_names_the_drive_holding_a_disc(self) -> None:
+        """MakeMKV's DRV: lines say where the disc is -- surface that."""
+        log_text = "\n".join(
+            [
+                'DRV:0,0,999,0,"DVD+R-DL ASUS DRW-24F1ST","","E:"',
+                'DRV:1,2,999,1,"BD-RE MATSHITA BD-MLT UJ272","BARBIE","F:"',
+                'MSG:5010,0,0,"Failed to open disc","Failed to open disc"',
+            ]
+        )
+        message = _describe_makemkv_failure(log_text, Path("makemkv.log"))
+        self.assertIn("could not open the disc", message.lower())
+        self.assertIn("F:", message)
+        self.assertIn("BARBIE", message)
+
+    def test_failed_to_open_disc_without_any_loaded_drive(self) -> None:
+        log_text = "\n".join(
+            [
+                'DRV:0,0,999,0,"DVD+R-DL ASUS DRW-24F1ST","","E:"',
+                'MSG:5010,0,0,"Failed to open disc","Failed to open disc"',
+            ]
+        )
+        message = _describe_makemkv_failure(log_text, Path("makemkv.log"))
+        self.assertIn("could not open the disc", message.lower())
+        self.assertNotIn("select that drive", message.lower())
+
+    def test_drive_parsing_ignores_empty_slots(self) -> None:
+        log_text = "\n".join(
+            [
+                'DRV:0,0,999,0,"DVD+R-DL ASUS","","E:"',
+                'DRV:2,256,999,0,"","",""',
+                'DRV:1,2,999,1,"BD-RE MATSHITA","BARBIE","F:"',
+            ]
+        )
+        self.assertEqual(_drives_with_media_from_log(log_text), [("F:", "BARBIE")])
+
+    def test_expired_beta_key_message_still_takes_priority(self) -> None:
+        log_text = 'MSG:5021,0,0,"The temporary key has expired","x"'
+        message = _describe_makemkv_failure(log_text, Path("makemkv.log"))
+        self.assertIn("beta key", message.lower())
+
+    def test_no_disc_message_without_alternatives(self) -> None:
+        message = _no_disc_message("E:", [{"drive": "E:", "has_media": False, "volume_label": ""}])
+        self.assertIn("No disc detected in E:", message)
+        self.assertIn("Insert a disc", message)
 
     def test_parse_beta_expiry_date_handles_end_of_month(self) -> None:
         parsed = _parse_beta_expiry_date("The current beta key is valid until end of September 2026.")

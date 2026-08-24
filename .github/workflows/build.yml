@@ -34,6 +34,10 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Check Tauri command wiring
+        working-directory: frontend
+        run: npm run check:commands
+
       - name: Build frontend
         working-directory: frontend
         run: npm run build

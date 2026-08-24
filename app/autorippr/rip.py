@@ -712,13 +712,74 @@ def _output_size_mb(output_dir: Path) -> float:
 
 
 def _describe_makemkv_failure(log_text: str, log_path: Path) -> str:
+    """
+    Turn a MakeMKV failure into something the user can act on.
+
+    "MakeMKV failed with non-zero exit code" tells nobody anything. The robot
+    log almost always says what actually went wrong, and for the most common
+    case -- pointing at the wrong drive -- it even lists which drive holds a
+    disc.
+    """
     lowered = log_text.lower()
+
     if "version is too old" in lowered or "temporary key has expired" in lowered:
         return (
             "MakeMKV cannot rip because its beta key expired or the installed version is too old. "
             f"Update MakeMKV or enter a valid registration key, then retry. See log: {log_path}"
         )
+
+    if "failed to open disc" in lowered:
+        loaded = _drives_with_media_from_log(log_text)
+        if loaded:
+            where = ", ".join(f"{letter} ({label or 'unlabelled'})" for letter, label in loaded)
+            return (
+                "MakeMKV could not open the disc in the selected drive. "
+                f"A disc is loaded in {where} -- select that drive and try again. "
+                f"See log: {log_path}"
+            )
+        return (
+            "MakeMKV could not open the disc. Check that a disc is loaded, readable, and "
+            f"fully spun up, then retry. See log: {log_path}"
+        )
+
+    if "no such file or directory" in lowered or "access denied" in lowered:
+        return (
+            "MakeMKV could not write to the staging folder. Check the staging path and "
+            f"available disk space. See log: {log_path}"
+        )
+
+    if "encountered" in lowered and "hash check" in lowered:
+        return (
+            "MakeMKV hit unreadable sectors on this disc. Clean the disc and retry; if it "
+            f"persists the disc may be damaged. See log: {log_path}"
+        )
+
     return f"MakeMKV failed with non-zero exit code. See log: {log_path}"
+
+
+def _drives_with_media_from_log(log_text: str) -> list[tuple[str, str]]:
+    """
+    Pull "this drive has a disc" out of MakeMKV's DRV: lines.
+
+    Format: DRV:index,visible,enabled,flags,"drive name","disc label","letter"
+    A drive with no disc reports an empty label and drive letter.
+    """
+    found: list[tuple[str, str]] = []
+    for raw_line in log_text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("DRV:"):
+            continue
+        try:
+            row = next(csv.reader(StringIO(line.partition(":")[2])))
+        except (StopIteration, csv.Error):
+            continue
+        if len(row) < 7:
+            continue
+        label = str(row[5]).strip()
+        letter = str(row[6]).strip()
+        if letter and label:
+            found.append((letter, label))
+    return found
 
 
 def _probe_makemkv_local_status(makemkv: Path) -> dict[str, Any]:
@@ -859,6 +920,11 @@ def _read_makemkv_disc_info(
         )
     except (subprocess.TimeoutExpired, OSError):
         return "", {}
+    if proc.returncode != 0:
+        # A failed scan is not the same as a disc with no titles. Returning
+        # empty text lets the caller log it as "scan unavailable" rather than
+        # silently deciding the disc has nothing worth ripping.
+        return "", {}
     output = (
         f"COMMAND: {' '.join(cmd)}\n"
         f"EXIT_CODE: {proc.returncode}\n\n"
@@ -902,6 +968,15 @@ def _build_makemkv_source_spec(optical_drive: str | None, disc_index: int) -> st
 
 
 def _ensure_drive_available(conn, job_id: str, optical_drive: str | None) -> None:
+    """
+    Refuse to start a rip that cannot possibly work.
+
+    Checks two things: that no other job is already ripping from this drive,
+    and that the drive actually has a disc in it. Without the second check a
+    job aimed at an empty drive runs a full disc scan, falls back to ripping
+    every title, and then dies on MakeMKV's opaque "Failed to open disc"
+    (exit 11) a minute later.
+    """
     normalized = (optical_drive or "").strip().upper()
     if not normalized:
         return
@@ -916,6 +991,35 @@ def _ensure_drive_available(conn, job_id: str, optical_drive: str | None) -> Non
     ).fetchone()
     if conflict:
         raise RipError(f"Optical drive {normalized} is already being used by job {conflict['id']}.")
+
+    drives = discover_optical_drives()
+    if not drives:
+        # Could not enumerate drives (non-Windows, or the API failed). Let
+        # MakeMKV be the judge rather than blocking a rip that might work.
+        return
+
+    match = next((d for d in drives if str(d.get("drive", "")).upper() == normalized), None)
+    if match is None:
+        known = ", ".join(str(d.get("drive")) for d in drives)
+        raise RipError(
+            f"Optical drive {normalized} was not found. Detected drives: {known or 'none'}."
+        )
+    if not match.get("has_media"):
+        raise RipError(_no_disc_message(normalized, drives))
+
+
+def _no_disc_message(normalized: str, drives: list[dict[str, Any]]) -> str:
+    """Explain that the drive is empty, and say where the disc actually is."""
+    loaded = [d for d in drives if d.get("has_media") and str(d.get("drive", "")).upper() != normalized]
+    if not loaded:
+        return f"No disc detected in {normalized}. Insert a disc and start the job again."
+    where = ", ".join(
+        f"{d.get('drive')} ({d.get('volume_label') or 'unlabelled'})" for d in loaded
+    )
+    return (
+        f"No disc detected in {normalized}, but one is loaded in {where}. "
+        "Select that drive and start the job again."
+    )
 
 
 def _clear_stale_rip_output(rip_output_dir: Path) -> int:
