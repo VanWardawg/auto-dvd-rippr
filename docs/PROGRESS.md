@@ -38,7 +38,33 @@ Branch: `feat/hardening-and-rip-improvements` (not yet merged to `main`)
 
 ---
 
+## Where the time actually goes (measured over 153 completed jobs)
+
+| | total | median | note |
+| --- | --- | --- | --- |
+| **Waiting for a human** | **107.4h** | 35 min | 37% of jobs stop to ask |
+| Ripping | 47.9h | 17.1 min | real compute |
+| Copying | 9.9h | 2.0 min | ~halved by streaming checksums |
+| Menu analysis | 2.5h | 1.1 min | succeeds 17% of the time |
+
+The machine works ~48h and waits on a human ~107h. Throughput work should
+target the waiting, not the compute.
+
 ## Next up (found by running the app on real discs)
+
+- **Free the drive during review.** A job awaiting review keeps its disc in the
+  drive, so continuous mode cannot start the next one: 17 min of ripping
+  occupies the drive for ~52 min. Ejecting after the rip is roughly a 3x
+  throughput gain. Blocked on one thing: `_discover_dvd_menu_vobs` reads
+  VIDEO_TS off the optical drive, and `eject_after_rip` currently fires before
+  identify -- so enabling it today silently disables the menu-analysis fallback
+  that succeeds 17% of the time. Fix by capturing menu artifacts during the rip
+  stage, then ejecting.
+- **Strip disc-junk tokens from labels.** `PRINCESS_BRIDE_CE`, `EVERAFTER169`
+  (16:9), `PAW_PATROL_NA`, `THESECRETLIFEOFWALTERMITTY` (no spaces).
+- **Batch review queue** so several discs can be cleared in one sitting.
+- **Cap menu analysis runtime.** Median is 1.1 min but one job burned 11 min
+  for nothing. A 3 min ceiling costs nothing.
 
 - **Clear the progress row when artifacts are cleared.**
   `clear_job_local_artifacts` and `clear_job_output_artifacts` leave the
@@ -131,3 +157,22 @@ Test suite grew from 31 to 55 cases.
   than surfacing a raw WinError from a mkdir after the rip and rename are done.
 
 Test suite grew from 55 to 65 cases.
+
+### 2026-08-24 — runtime disambiguation
+
+`_score_runtime_hint` bucketed the ripped duration into a coarse prior without
+ever looking at the candidate, so same-title films were indistinguishable and
+fell through to manual review. The leading candidates now get a real runtime
+from the detail endpoint (cached) and are scored on the difference.
+
+Measured against ten labels from the job history that had required manual
+review: correct auto-selections went from 2/10 to 5/10, with no wrong
+auto-selections. Every remaining block is genuine ambiguity -- Overboard 1987
+and 2018 both run exactly 112 minutes; Robin Hood 1973 (83m) and 1991 (86m)
+are within PAL-speedup distance of each other; and for SINBAD the correct film
+is not in TMDB's results at all, which is precisely the case where a confident
+pick would have written a mis-named file to the NAS.
+
+That last case needed a new guard: when several candidates share the leader's
+title, runtime only confers confidence if the match is near-exact *and* clearly
+better than every rival. Test suite grew from 65 to 91 cases.

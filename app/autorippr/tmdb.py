@@ -613,7 +613,177 @@ def _rank_candidates_for_query_variants(
             )
 
     deduped = _dedupe_candidates(candidates)
-    return sorted(deduped, key=lambda x: x["score"], reverse=True)
+    ranked = sorted(deduped, key=lambda x: x["score"], reverse=True)
+    return _rescore_with_actual_runtimes(conn, cfg, ranked, avg_runtime_minutes)
+
+
+# How many of the leading candidates get a runtime lookup. Each one is a
+# detail request, cached in tmdb_cache after the first time. Same-title films
+# cluster at the top, so the tie that needs breaking is always in this window.
+RUNTIME_LOOKUP_LIMIT = 6
+
+# Extra lookups allowed for rivals that share the leader's exact title, which
+# are the only ones the ambiguity guard actually weighs.
+SAME_TITLE_LOOKUP_LIMIT = 12
+
+
+def _rescore_with_actual_runtimes(
+    conn,
+    cfg: AppConfig,
+    ranked: list[dict[str, Any]],
+    avg_runtime_minutes: float | None,
+) -> list[dict[str, Any]]:
+    """
+    Break ties using the runtime of the disc we actually ripped.
+
+    Search results carry no runtime, so scoring could only apply a coarse prior
+    based on the ripped duration alone -- it never compared it to anything. The
+    result was that same-title films ("Robin Hood", "Pride and Prejudice",
+    "Overboard") were indistinguishable and fell through to manual review, even
+    though the ripped runtime identifies them almost uniquely.
+
+    The detail endpoint has the runtime, and responses are cached, so this
+    costs a handful of requests once per disc.
+    """
+    if not avg_runtime_minutes or avg_runtime_minutes <= 0 or not ranked:
+        return ranked
+
+    for candidate in ranked[:RUNTIME_LOOKUP_LIMIT]:
+        _resolve_candidate_runtime(conn, cfg, candidate, avg_runtime_minutes)
+
+    ranked = sorted(ranked, key=lambda x: x["score"], reverse=True)
+
+    # Every rival sharing the leader's title also needs a runtime, even if it
+    # sits outside the window above. The ambiguity guard treats an unknown
+    # runtime as unresolved, so leaving these blank would make a title like
+    # "Robin Hood" permanently ambiguous no matter how exact the match.
+    leader_title = _normalize_identify_query(str(ranked[0].get("title") or ""), "movie")
+    unchecked = [
+        candidate
+        for candidate in ranked
+        if _shares_title(candidate, leader_title) and _runtime_lookup_state(candidate) is None
+    ]
+    for candidate in unchecked[:SAME_TITLE_LOOKUP_LIMIT]:
+        _resolve_candidate_runtime(conn, cfg, candidate, avg_runtime_minutes)
+    if unchecked:
+        ranked = sorted(ranked, key=lambda x: x["score"], reverse=True)
+
+    return ranked
+
+
+def _shares_title(candidate: dict[str, Any], title: str) -> bool:
+    if not title:
+        return False
+    return _normalize_identify_query(str(candidate.get("title") or ""), "movie") == title
+
+
+def _runtime_lookup_state(candidate: dict[str, Any]) -> str | None:
+    """"resolved", "unavailable", or None when no lookup was attempted."""
+    breakdown = candidate.get("score_breakdown")
+    if not isinstance(breakdown, dict):
+        return None
+    value = breakdown.get("runtime_lookup")
+    return str(value) if value else None
+
+
+def _resolve_candidate_runtime(
+    conn,
+    cfg: AppConfig,
+    candidate: dict[str, Any],
+    avg_runtime_minutes: float,
+) -> None:
+    """
+    Look a candidate's runtime up and record the outcome.
+
+    Recording *that we asked* matters as much as the answer: TMDB simply has no
+    runtime for obscure or unreleased entries, and those must not veto an
+    otherwise decisive match the way a genuinely unchecked rival would.
+    """
+    breakdown = candidate.get("score_breakdown")
+    if not isinstance(breakdown, dict):
+        return
+    runtime = _fetch_candidate_runtime(conn, cfg, candidate)
+    if runtime is None:
+        breakdown["runtime_lookup"] = "unavailable"
+        return
+    breakdown["runtime_lookup"] = "resolved"
+    _apply_runtime_to_candidate(candidate, avg_runtime_minutes, runtime)
+
+
+def _fetch_candidate_runtime(conn, cfg: AppConfig, candidate: dict[str, Any]) -> float | None:
+    """Runtime in minutes from the detail endpoint, or None if unavailable."""
+    media_type = str(candidate.get("media_type") or "")
+    tmdb_id = candidate.get("tmdb_id")
+    if not isinstance(tmdb_id, int) or media_type not in ("movie", "tv"):
+        return None
+    try:
+        detail = _cached_tmdb_get(conn, cfg, f"/{media_type}/{tmdb_id}", {})
+    except TmdbError:
+        # A detail lookup failing must never sink identification; the
+        # candidate simply keeps its prior score.
+        return None
+    if not isinstance(detail, dict):
+        return None
+
+    if media_type == "movie":
+        runtime = detail.get("runtime")
+    else:
+        # TV reports a list of typical episode runtimes.
+        episode_runtimes = detail.get("episode_run_time")
+        runtime = episode_runtimes[0] if isinstance(episode_runtimes, list) and episode_runtimes else None
+
+    try:
+        value = float(runtime)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _apply_runtime_to_candidate(
+    candidate: dict[str, Any],
+    ripped_minutes: float,
+    candidate_minutes: float,
+) -> None:
+    """Swap the runtime prior for a real comparison and recompute the score."""
+    breakdown = candidate.get("score_breakdown")
+    if not isinstance(breakdown, dict):
+        return
+    weights = breakdown.get("weights")
+    if not isinstance(weights, dict):
+        return
+
+    previous = float(breakdown.get("runtime_fit") or 0.0)
+    actual = _score_runtime_match(ripped_minutes, candidate_minutes)
+    weight = float(weights.get("runtime_fit") or 0.0)
+
+    candidate["score"] = round(float(candidate.get("score") or 0.0) + (actual - previous) * weight, 6)
+    breakdown["runtime_fit"] = round(actual, 6)
+    breakdown["candidate_runtime_minutes"] = candidate_minutes
+    breakdown["runtime_delta_minutes"] = round(abs(ripped_minutes - candidate_minutes), 2)
+
+
+def _score_runtime_match(ripped_minutes: float, candidate_minutes: float) -> float:
+    """
+    How well a candidate's runtime matches the disc, in [0, 1].
+
+    Tolerances are wide enough to absorb the usual discrepancies -- PAL speedup
+    is ~4%, and TMDB runtimes are often rounded or taken from a different cut
+    -- while still separating films that merely share a title.
+    """
+    if ripped_minutes <= 0 or candidate_minutes <= 0:
+        return 0.5
+    delta = abs(ripped_minutes - candidate_minutes)
+    relative = delta / candidate_minutes
+
+    if delta <= 2 or relative <= 0.02:
+        return 1.0
+    if delta <= 5 or relative <= 0.05:
+        return 0.85
+    if delta <= 10 or relative <= 0.10:
+        return 0.6
+    if delta <= 20:
+        return 0.3
+    return 0.0
 
 
 def _build_candidate(
@@ -730,9 +900,15 @@ def _score_season_hint(hint_season: int | None, title: str, item: dict[str, Any]
 
 
 def _score_runtime_hint(avg_runtime_minutes: float | None, item: dict[str, Any]) -> float:
+    """
+    Coarse prior used before the real runtime is known.
+
+    Search results carry no runtime, so this can only say "a 25 minute disc
+    looks episodic". _rescore_with_actual_runtimes replaces this with a real
+    comparison for the leading candidates once the detail endpoint is queried.
+    """
     if avg_runtime_minutes is None:
         return 0.5
-    # Search results rarely contain exact runtime; apply soft prior.
     # Kids episodic DVDs often 6-30min episodes.
     if avg_runtime_minutes <= 0:
         return 0.5
@@ -836,6 +1012,81 @@ def _has_movie_same_title_year_ambiguity(
     return abs(first_score - second_score) <= 0.03
 
 
+# A runtime this close is treated as identifying: PAL speedup and rounding
+# account for a minute or two, nothing else does.
+RUNTIME_PROOF_DELTA_MINUTES = 2.0
+# ...and it only counts as proof if every rival with the same title is at
+# least this much further away.
+RUNTIME_PROOF_MARGIN_MINUTES = 5.0
+
+
+def _same_title_lacks_runtime_proof(
+    ranked: list[dict[str, Any]],
+    requested_media_type: str,
+) -> bool:
+    """
+    True when several candidates share the top title and runtime does not
+    decisively single one out.
+
+    A disc labelled "SINBAD" matches five different films actually titled
+    "Sinbad", and the one the user wants (Sinbad: Legend of the Seven Seas)
+    is not even among them -- TMDB's search does not return it. Scoring the
+    ripped runtime against the survivors produced a confident pick of the
+    wrong film, which is worse than asking: a wrong auto-selection puts a
+    mis-named file on the NAS, while a question costs one click.
+
+    Runtime may still resolve this, but only when it is genuinely decisive:
+    "Robin Hood" is equally ambiguous by title, yet an 83-minute disc matches
+    Disney's 1973 film exactly and nothing else close.
+    """
+    if requested_media_type != "movie" or len(ranked) < 2:
+        return False
+
+    top = ranked[0]
+    top_title = _normalize_identify_query(str(top.get("title") or ""), "movie")
+    if not top_title:
+        return False
+
+    same_title = [
+        candidate
+        for candidate in ranked
+        if str(candidate.get("media_type") or "") == "movie"
+        and _normalize_identify_query(str(candidate.get("title") or ""), "movie") == top_title
+    ]
+    if len(same_title) < 2:
+        return False
+
+    top_delta = _runtime_delta(top)
+    if top_delta is None or top_delta > RUNTIME_PROOF_DELTA_MINUTES:
+        # No runtime, or not close enough to be identifying.
+        return True
+
+    for rival in same_title[1:]:
+        rival_delta = _runtime_delta(rival)
+        if rival_delta is None:
+            if _runtime_lookup_state(rival) == "unavailable":
+                # TMDB holds no runtime for this entry -- usually an obscure or
+                # unreleased title. Not a credible rival to an exact match.
+                continue
+            # Never checked, so it cannot be ruled out.
+            return True
+        if rival_delta - top_delta < RUNTIME_PROOF_MARGIN_MINUTES:
+            return True
+
+    return False
+
+
+def _runtime_delta(candidate: dict[str, Any]) -> float | None:
+    breakdown = candidate.get("score_breakdown")
+    if not isinstance(breakdown, dict):
+        return None
+    value = breakdown.get("runtime_delta_minutes")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _cached_tmdb_get(conn, cfg: AppConfig, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
     params_sorted = {k: params[k] for k in sorted(params.keys())}
     cache_key = _cache_key(endpoint, params_sorted)
@@ -924,6 +1175,8 @@ def _should_auto_select_primary_candidate(
     if _has_movie_franchise_ambiguity(ranked, requested_media_type):
         return False
     if _has_movie_same_title_year_ambiguity(ranked, requested_media_type):
+        return False
+    if _same_title_lacks_runtime_proof(ranked, requested_media_type):
         return False
     if top_score >= threshold:
         return True
