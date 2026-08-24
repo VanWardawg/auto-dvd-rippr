@@ -66,7 +66,8 @@ class RuntimeRegressionTests(unittest.TestCase):
             finally:
                 conn.close()
 
-    def test_build_review_state_flags_stalled_rip_with_flat_heartbeats(self) -> None:
+    def test_build_review_state_flags_stalled_rip(self) -> None:
+        """A rip that keeps heartbeating without advancing must be flagged."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             job_id = "job-123"
@@ -81,33 +82,20 @@ class RuntimeRegressionTests(unittest.TestCase):
                 "movie_mode": "single",
                 "updated_at": "2026-08-15T02:08:04+00:00",
             }
-            logs = [
-                {
-                    "timestamp": "2026-08-15T02:07:04+00:00",
-                    "message": "Starting MakeMKV rip to C:\\temp\\rip_output",
-                },
-                {
-                    "timestamp": "2026-08-15T02:07:19+00:00",
-                    "message": "Rip heartbeat: files=0, size_mb=0.0",
-                },
-                {
-                    "timestamp": "2026-08-15T02:07:34+00:00",
-                    "message": "Rip heartbeat: files=0, size_mb=0.0",
-                },
-                {
-                    "timestamp": "2026-08-15T02:07:49+00:00",
-                    "message": "Rip heartbeat: files=0, size_mb=0.0",
-                },
-                {
-                    "timestamp": "2026-08-15T02:08:04+00:00",
-                    "message": "Rip heartbeat: files=0, size_mb=0.0",
-                },
-            ]
+            # Still reporting a minute after progress last moved.
+            progress_row = {
+                "stage": "ripping",
+                "current_units": 1024.0,
+                "total_units": 65536.0,
+                "updated_at": "2026-08-15T02:08:04+00:00",
+                "last_advance_at": "2026-08-15T02:07:04+00:00",
+            }
 
             review = cli_main._build_review_state(
                 cfg=cfg,
                 job=job,
-                logs=logs,
+                logs=[],
+                progress_row=progress_row,
                 selected_media=None,
                 selected_movies=[],
                 tmdb_rows=[],
@@ -119,7 +107,47 @@ class RuntimeRegressionTests(unittest.TestCase):
 
             self.assertTrue(review["rip"]["needed"])
             self.assertIn("stalled", review["rip"]["reason"].lower())
-            self.assertTrue(any("0.0 MB" in detail for detail in review["rip"]["details"]))
+            self.assertTrue(any("60s" in detail for detail in review["rip"]["details"]))
+
+    def test_build_review_state_accepts_healthy_rip(self) -> None:
+        """A rip that is advancing must not be flagged for review."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            job_id = "job-124"
+            log_dir = tmp_path / "jobs" / job_id / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            (log_dir / "makemkv.log").write_text("", encoding="utf-8")
+            cfg = SimpleNamespace(staging_root=str(tmp_path))
+            job = {
+                "id": job_id,
+                "status": "ripping",
+                "media_type": "movie",
+                "movie_mode": "single",
+                "updated_at": "2026-08-15T02:08:04+00:00",
+            }
+            progress_row = {
+                "stage": "ripping",
+                "current_units": 32768.0,
+                "total_units": 65536.0,
+                "updated_at": "2026-08-15T02:08:04+00:00",
+                "last_advance_at": "2026-08-15T02:08:03+00:00",
+            }
+
+            review = cli_main._build_review_state(
+                cfg=cfg,
+                job=job,
+                logs=[],
+                progress_row=progress_row,
+                selected_media=None,
+                selected_movies=[],
+                tmdb_rows=[],
+                mapping_rows=[],
+                rip_title_rows=[],
+                bundle_association=None,
+                tmdb_threshold=0.75,
+            )
+
+            self.assertFalse(review["rip"]["needed"])
 
     def test_parse_beta_expiry_date_handles_end_of_month(self) -> None:
         parsed = _parse_beta_expiry_date("The current beta key is valid until end of September 2026.")
@@ -179,6 +207,7 @@ class RuntimeRegressionTests(unittest.TestCase):
                 cfg=cfg,
                 job=job,
                 logs=[],
+                progress_row=None,
                 selected_media=None,
                 selected_movies=[],
                 tmdb_rows=[],

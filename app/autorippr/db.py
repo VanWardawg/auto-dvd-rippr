@@ -163,19 +163,70 @@ CREATE TABLE IF NOT EXISTS transfer_attempts (
     created_at TEXT NOT NULL,
     FOREIGN KEY(output_id) REFERENCES outputs(id)
 );
+
+CREATE TABLE IF NOT EXISTS job_progress (
+    job_id TEXT PRIMARY KEY,
+    stage TEXT NOT NULL,
+    kind TEXT,
+    current_units REAL,
+    total_units REAL,
+    unit TEXT NOT NULL DEFAULT 'mb',
+    rate_per_second REAL,
+    eta_seconds REAL,
+    detail TEXT,
+    title_index INTEGER,
+    title_count INTEGER,
+    updated_at TEXT NOT NULL,
+    -- When current_units last actually increased. Distinct from updated_at,
+    -- which moves on every heartbeat even if the underlying work is wedged;
+    -- the difference between the two is how a stalled rip is detected.
+    last_advance_at TEXT,
+    FOREIGN KEY(job_id) REFERENCES jobs(id)
+);
 """
+
+# Bump this whenever SCHEMA_SQL or _apply_best_effort_migrations changes.
+#
+# open_db is called by *every* CLI invocation, and the UI polls several times a
+# second, so running the schema script and column migrations each time meant a
+# write transaction per poll -- needless lock contention against a rip that is
+# writing progress at the same time. Gating on PRAGMA user_version means the
+# DDL runs once per schema change instead. Forget to bump it and your new
+# table will not appear on existing databases.
+SCHEMA_VERSION = 2
 
 
 def open_db(db_path: str) -> sqlite3.Connection:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(path)
+    # timeout: how long to wait on a locked database before raising
+    # "database is locked". The default of 5s is not enough when several
+    # drives rip concurrently while ffmpeg splits and a NAS transfer run.
+    conn = sqlite3.connect(path, timeout=30.0)
     conn.row_factory = sqlite3.Row
+
+    # WAL lets the polling UI read while a pipeline process writes, instead of
+    # the two blocking each other. It is a persistent property of the database
+    # file, but it is not supported on network shares -- if staging_root points
+    # at a UNC path, fall back to the default rollback journal rather than
+    # failing to open the database at all.
+    try:
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+    except sqlite3.DatabaseError:
+        pass
+
+    conn.execute("PRAGMA busy_timeout = 30000;")
     conn.execute("PRAGMA foreign_keys = ON;")
-    conn.executescript(SCHEMA_SQL)
-    _apply_best_effort_migrations(conn)
-    conn.commit()
+
+    current_version = int(conn.execute("PRAGMA user_version;").fetchone()[0])
+    if current_version != SCHEMA_VERSION:
+        conn.executescript(SCHEMA_SQL)
+        _apply_best_effort_migrations(conn)
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+        conn.commit()
+
     return conn
 
 
@@ -203,4 +254,7 @@ def _apply_best_effort_migrations(conn: sqlite3.Connection) -> None:
     mapping_columns = {row["name"] for row in conn.execute("PRAGMA table_info(episode_mappings)").fetchall()}
     if "episode_titles_json" not in mapping_columns:
         conn.execute("ALTER TABLE episode_mappings ADD COLUMN episode_titles_json TEXT")
+    progress_columns = {row["name"] for row in conn.execute("PRAGMA table_info(job_progress)").fetchall()}
+    if progress_columns and "last_advance_at" not in progress_columns:
+        conn.execute("ALTER TABLE job_progress ADD COLUMN last_advance_at TEXT")
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import AppConfig
+from .progress import clear_progress, upsert_progress
 from .state import append_job_log
 
 
@@ -103,6 +104,7 @@ def transfer_job_outputs(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
         copied.append({"output_id": out_id, "nas_path": str(nas_final), "checksum_sha256": checksum})
         conn.commit()
 
+    clear_progress(conn, job_id)
     append_job_log(
         conn,
         job_id,
@@ -187,16 +189,17 @@ def _emit_transfer_heartbeat(
     total_mb = total_bytes / (1024 * 1024)
     rate_mb_s = rate_bytes_per_sec / (1024 * 1024)
     remaining_seconds = max(0.0, (total_bytes - copied_bytes) / max(rate_bytes_per_sec, 1.0))
-    append_job_log(
+    upsert_progress(
         conn,
         job_id,
-        "INFO",
-        (
-            f"Transfer heartbeat: output_id={output_id}, copied_mb={copied_mb:.1f}, "
-            f"total_mb={total_mb:.1f}, rate_mb_s={rate_mb_s:.2f}, eta_seconds={remaining_seconds:.0f}"
-        ),
-        None,
-        None,
+        stage="copying",
+        kind="copying",
+        current_units=copied_mb,
+        total_units=total_mb,
+        unit="mb",
+        rate_per_second=rate_mb_s,
+        eta_seconds=remaining_seconds,
+        detail=f"Copying {copied_mb:.1f} / {total_mb:.1f} MB",
     )
     conn.commit()
 

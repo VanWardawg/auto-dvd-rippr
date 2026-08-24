@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import AppConfig
+from .progress import clear_progress, upsert_progress
 from .logger import get_logger
 from .state import append_job_log, get_job
 
@@ -564,8 +565,15 @@ def _emit_rip_heartbeat(conn, job_id: str, output_dir: Path) -> None:
         total_bytes += int(st.st_size)
         latest_mtime = st.st_mtime if latest_mtime is None else max(latest_mtime, st.st_mtime)
     mb = round(total_bytes / (1024 * 1024), 1)
-    msg = f"Rip heartbeat: files={count}, size_mb={mb}"
-    append_job_log(conn, job_id, "INFO", msg, None, None)
+    upsert_progress(
+        conn,
+        job_id,
+        stage="ripping",
+        kind="ripping",
+        current_units=mb,
+        unit="mb",
+        detail=f"Ripping {mb:.1f} MB across {count} file(s)",
+    )
     conn.execute(
         "UPDATE jobs SET updated_at = ? WHERE id = ?",
         (datetime.now(timezone.utc).isoformat(), job_id),

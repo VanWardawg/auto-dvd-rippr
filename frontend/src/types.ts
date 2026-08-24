@@ -139,6 +139,10 @@ export interface ProgressState {
   current_mb?: number | null;
   total_mb?: number | null;
   kind?: string | null;
+  /** 1-based index of the title being ripped, when the stage reports one. */
+  title_index?: number | null;
+  /** Total titles selected for this rip. */
+  title_count?: number | null;
 }
 
 export interface JobLog {

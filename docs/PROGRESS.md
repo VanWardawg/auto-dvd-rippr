@@ -30,11 +30,11 @@ Branch: `feat/hardening-and-rip-improvements`
 - [ ] Parse MakeMKV robot progress (`PRGV`/`PRGC`/`PRGT`) instead of polling directory size
 - [ ] Eject the disc when a rip finishes
 
-### Track 3 — Concurrency and state
+### Track 3 — Concurrency and state  ✅ complete
 
-- [ ] Enable SQLite WAL + a longer busy timeout
-- [ ] Stop running schema DDL on every CLI invocation
-- [ ] Move progress into a `job_progress` table instead of parsing log strings
+- [x] Enable SQLite WAL + a longer busy timeout
+- [x] Stop running schema DDL on every CLI invocation
+- [x] Move progress into a `job_progress` table instead of parsing log strings
 
 ---
 

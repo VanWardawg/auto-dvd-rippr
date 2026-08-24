@@ -33,6 +33,7 @@ from autorippr.splitter import SplitError, execute_splits, plan_splits_for_job, 
 from autorippr.naming import NamingError, finalize_job_outputs, select_likely_movie_feature_rows
 from autorippr.transfer import TransferError, transfer_job_outputs
 from autorippr.pipeline import resume_incomplete_jobs, run_pipeline_for_job
+from autorippr.progress import get_progress
 from autorippr.job_ops import (
     JobDeleteError,
     cancel_job,
@@ -75,27 +76,24 @@ def _job_has_local_artifacts(staging_root: str, job_id: str) -> bool:
     return any(path.exists() for path in artifact_dirs)
 
 
-def _parse_progress_keyvals(message: str, prefix: str) -> dict[str, float] | None:
-    if not message.startswith(prefix):
-        return None
-    payload = message[len(prefix):].strip()
-    parsed: dict[str, float] = {}
-    for part in payload.split(","):
-        if "=" not in part:
-            continue
-        key, value = part.split("=", 1)
-        try:
-            parsed[key.strip()] = float(value.strip())
-        except ValueError:
-            continue
-    return parsed
+# How long a stage may report without advancing before the UI flags it for
+# review. Long enough to survive MakeMKV retrying a scratched sector, short
+# enough that a genuinely wedged rip does not burn an evening.
+STALL_WARN_SECONDS = 60.0
 
 
-def _extract_expected_rip_size_mb(log_text: str) -> float | None:
-    match = re.search(r"total size of all output files may reach as much as (\d+) megabytes", log_text, flags=re.IGNORECASE)
-    if not match:
+def _seconds_since_last_advance(progress_row: dict[str, Any] | None) -> float | None:
+    """Seconds since progress last actually moved, or None if unknown."""
+    if not progress_row:
         return None
-    return float(match.group(1))
+    last_advance = _parse_iso_timestamp(progress_row.get("last_advance_at"))
+    updated = _parse_iso_timestamp(progress_row.get("updated_at"))
+    if last_advance is None or updated is None:
+        return None
+    # Compare against the row's own latest heartbeat rather than wall-clock
+    # now: if the writing process died the row goes stale, and that is a
+    # different failure that the job's updated_at check already covers.
+    return max(0.0, (updated - last_advance).total_seconds())
 
 
 def _parse_iso_timestamp(value: str | None) -> datetime | None:
@@ -110,10 +108,18 @@ def _parse_iso_timestamp(value: str | None) -> datetime | None:
 def _build_progress_state(
     cfg,
     job: dict[str, Any],
-    logs: list[dict[str, Any]],
+    progress_row: dict[str, Any] | None,
     output_rows: list[Any],
     job_id: str,
 ) -> dict[str, Any]:
+    """
+    Build the progress block the UI renders, from the structured job_progress
+    row that the pipeline stages write.
+
+    Overall fraction is a blend: which stage the job is in sets the coarse
+    position, and the active stage's own fraction fills in between. Ripping and
+    copying dominate the wall clock, so they get most of the bar.
+    """
     status = str(job.get("status") or "queued")
     media_type = str(job.get("media_type") or "movie")
     movie_stages = ["queued", "ripping", "identifying", "renaming", "copying", "done"]
@@ -130,65 +136,61 @@ def _build_progress_state(
         "current_mb": None,
         "total_mb": None,
         "kind": None,
+        "title_index": None,
+        "title_count": None,
     }
 
+    row = progress_row if progress_row and str(progress_row.get("stage")) == status else None
+
     if status == "ripping":
-        rip_logs = [log for log in logs if str(log.get("message") or "").startswith("Rip heartbeat:")]
-        latest = _parse_progress_keyvals(str(rip_logs[-1]["message"]), "Rip heartbeat:") if rip_logs else None
-        previous = _parse_progress_keyvals(str(rip_logs[-2]["message"]), "Rip heartbeat:") if len(rip_logs) >= 2 else None
-        log_text = _read_text_file(Path(cfg.staging_root) / "jobs" / job_id / "logs" / "makemkv.log")
-        total_mb = _extract_expected_rip_size_mb(log_text)
-        current_mb = float(latest.get("size_mb")) if latest and latest.get("size_mb") is not None else None
-        rate_mb_s = None
-        eta_seconds = None
-        if latest and previous:
-            # Heartbeats are emitted every ~15s, so use that fixed interval for stable UI math.
-            delta = 15.0
-            rate_mb_s = max(0.0, (float(latest.get("size_mb", 0.0)) - float(previous.get("size_mb", 0.0))) / delta)
-            if total_mb and current_mb is not None and rate_mb_s > 0:
-                eta_seconds = max(0.0, (total_mb - current_mb) / rate_mb_s)
-        stage_fraction = 0.0
-        if total_mb and current_mb is not None and total_mb > 0:
-            stage_fraction = min(0.99, max(0.0, current_mb / total_mb))
-        elif current_mb is not None:
-            stage_fraction = 0.5
+        stage_fraction = _progress_fraction(row)
+        current_mb = _progress_float(row, "current_units")
+        total_mb = _progress_float(row, "total_units")
+        if stage_fraction is None:
+            # A rip that has started but not yet reported a measurable total:
+            # show indeterminate-ish motion rather than a bar pinned at zero.
+            stage_fraction = 0.0 if current_mb is None else 0.5
         progress.update(
             {
                 "overall_fraction": 0.10 + (0.45 if media_type == "movie" else 0.35) * stage_fraction,
                 "stage_fraction": stage_fraction,
-                "detail": f"Ripping {current_mb:.1f} / {total_mb:.1f} MB" if current_mb is not None and total_mb else ("Ripping in progress" if current_mb is None else f"Ripping {current_mb:.1f} MB"),
-                "eta_seconds": eta_seconds,
-                "rate_mb_s": rate_mb_s,
+                "detail": (row or {}).get("detail") or "Ripping in progress",
+                "eta_seconds": _progress_float(row, "eta_seconds"),
+                "rate_mb_s": _progress_float(row, "rate_per_second"),
                 "current_mb": current_mb,
                 "total_mb": total_mb,
                 "kind": "ripping",
+                "title_index": (row or {}).get("title_index"),
+                "title_count": (row or {}).get("title_count"),
             }
         )
         return progress
 
     if status == "copying":
-        transfer_logs = [log for log in logs if str(log.get("message") or "").startswith("Transfer heartbeat:")]
-        latest = _parse_progress_keyvals(str(transfer_logs[-1]["message"]), "Transfer heartbeat:") if transfer_logs else None
+        # The progress row tracks the file being copied right now; the UI wants
+        # the whole job, so aggregate across outputs from disk and take only
+        # rate/ETA from the row.
         total_bytes = 0
         copied_bytes = 0
         finalize_root = Path(cfg.staging_root) / "jobs" / job_id / "finalized"
-        for row in output_rows:
-            local_path = Path(str(row["local_path"]))
-            if local_path.exists():
-                size = local_path.stat().st_size
-                total_bytes += size
-                if row["transfer_status"] == "done" and row["nas_path"]:
-                    copied_bytes += size
-                else:
-                    try:
-                        relative = local_path.relative_to(finalize_root)
-                        base = "Movies" if media_type == "movie" else "TVShows"
-                        temp_dest = Path(cfg.nas_root) / base / relative
-                        temp_path = temp_dest.with_suffix(temp_dest.suffix + ".part")
-                        if temp_path.exists():
-                            copied_bytes += temp_path.stat().st_size
-                    except (ValueError, OSError):
-                        pass
+        for output_row in output_rows:
+            local_path = Path(str(output_row["local_path"]))
+            if not local_path.exists():
+                continue
+            size = local_path.stat().st_size
+            total_bytes += size
+            if output_row["transfer_status"] == "done" and output_row["nas_path"]:
+                copied_bytes += size
+                continue
+            try:
+                relative = local_path.relative_to(finalize_root)
+                base = "Movies" if media_type == "movie" else "TVShows"
+                temp_dest = Path(cfg.nas_root) / base / relative
+                temp_path = temp_dest.with_suffix(temp_dest.suffix + ".part")
+                if temp_path.exists():
+                    copied_bytes += temp_path.stat().st_size
+            except (ValueError, OSError):
+                pass
         total_mb = total_bytes / (1024 * 1024) if total_bytes else None
         current_mb = copied_bytes / (1024 * 1024) if total_bytes else None
         stage_fraction = min(0.99, copied_bytes / total_bytes) if total_bytes else 0.0
@@ -197,8 +199,8 @@ def _build_progress_state(
                 "overall_fraction": (0.85 if media_type == "movie" else 0.92) + (0.15 if media_type == "movie" else 0.08) * stage_fraction,
                 "stage_fraction": stage_fraction,
                 "detail": f"Copying {current_mb:.1f} / {total_mb:.1f} MB" if current_mb is not None and total_mb else "Copying in progress",
-                "eta_seconds": latest.get("eta_seconds") if latest else None,
-                "rate_mb_s": latest.get("rate_mb_s") if latest else None,
+                "eta_seconds": _progress_float(row, "eta_seconds"),
+                "rate_mb_s": _progress_float(row, "rate_per_second"),
                 "current_mb": current_mb,
                 "total_mb": total_mb,
                 "kind": "copying",
@@ -212,7 +214,33 @@ def _build_progress_state(
         progress["detail"] = "Completed"
         return progress
 
+    # Stages without their own measurable work (identify, map, rename) still
+    # surface whatever detail the stage reported.
+    if row and row.get("detail"):
+        progress["detail"] = row.get("detail")
+        progress["kind"] = row.get("kind")
+
     return progress
+
+
+def _progress_float(row: dict[str, Any] | None, key: str) -> float | None:
+    if not row:
+        return None
+    value = row.get(key)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _progress_fraction(row: dict[str, Any] | None) -> float | None:
+    current = _progress_float(row, "current_units")
+    total = _progress_float(row, "total_units")
+    if current is None or not total or total <= 0:
+        return None
+    return min(0.99, max(0.0, current / total))
 
 
 def _sync_movie_job_status(job: dict[str, Any], selected_media: Any) -> dict[str, Any]:
@@ -236,6 +264,7 @@ def _build_review_state(
     cfg,
     job: dict[str, Any],
     logs: list[dict[str, Any]],
+    progress_row: dict[str, Any] | None,
     selected_media: Any,
     selected_movies: list[dict[str, Any]],
     tmdb_rows: list[Any],
@@ -325,47 +354,31 @@ def _build_review_state(
                 "Movie job has multiple rip titles, but none are at least 45 minutes long."
             )
     if str(job.get("status")) == "ripping":
-        rip_heartbeats = [
-            log for log in logs
-            if str(log.get("message") or "").startswith("Rip heartbeat:")
-        ]
-        if latest_attempt_ts is not None:
-            rip_heartbeats = [
-                log for log in rip_heartbeats
-                if (_parse_iso_timestamp(log.get("timestamp")) or latest_attempt_ts) >= latest_attempt_ts
-            ]
-        if rip_heartbeats:
-            recent = rip_heartbeats[-4:]
-            parsed = [
-                (
-                    _parse_iso_timestamp(log.get("timestamp")),
-                    _parse_progress_keyvals(str(log.get("message")), "Rip heartbeat:"),
-                )
-                for log in recent
-            ]
-            parsed = [(ts, data) for ts, data in parsed if ts is not None and data is not None]
-            if len(parsed) >= 3:
-                first_ts = parsed[0][0]
-                last_ts = parsed[-1][0]
-                elapsed = (last_ts - first_ts).total_seconds()
-                sizes = [float(data.get("size_mb", 0.0)) for _, data in parsed]
-                if elapsed >= 45 and max(sizes) - min(sizes) < 1.0:
+        # A rip is stalled when MakeMKV keeps reporting but stops advancing.
+        # job_progress tracks both separately: updated_at moves on every
+        # heartbeat, last_advance_at only when the work actually progressed.
+        stall_seconds = _seconds_since_last_advance(progress_row)
+        if stall_seconds is not None and stall_seconds >= STALL_WARN_SECONDS:
+            rip_needed = True
+            rip_reason = "Rip appears stalled: MakeMKV has not made progress for about a minute."
+            rip_details.append(
+                f"MakeMKV progress has not advanced for {int(stall_seconds)}s."
+            )
+        elif progress_row is None:
+            start_rip_log = next(
+                (log for log in logs if str(log.get("message") or "").startswith("Starting MakeMKV rip")),
+                None,
+            )
+            latest_job_update = _parse_iso_timestamp(str(job.get("updated_at") or ""))
+            start_rip_ts = _parse_iso_timestamp(start_rip_log.get("timestamp")) if start_rip_log else None
+            if start_rip_ts and latest_job_update:
+                quiet_seconds = (latest_job_update - start_rip_ts).total_seconds()
+                if quiet_seconds >= STALL_WARN_SECONDS:
                     rip_needed = True
-                    rip_reason = "Rip appears stalled: MakeMKV has not increased output size for about a minute."
+                    rip_reason = "Rip appears stalled: MakeMKV started but reported no progress."
                     rip_details.append(
-                        f"Recent rip heartbeats stayed around {sizes[-1]:.1f} MB for {int(elapsed)}s."
+                        f"No rip progress was recorded for {int(quiet_seconds)}s after rip start."
                     )
-        start_rip_log = next((log for log in logs if str(log.get("message") or "").startswith("Starting MakeMKV rip to ")), None)
-        latest_job_update = _parse_iso_timestamp(str(job.get("updated_at") or ""))
-        start_rip_ts = _parse_iso_timestamp(start_rip_log.get("timestamp")) if start_rip_log else None
-        if start_rip_ts and latest_job_update:
-            quiet_seconds = (latest_job_update - start_rip_ts).total_seconds()
-            if quiet_seconds >= 60 and not rip_heartbeats:
-                rip_needed = True
-                rip_reason = "Rip appears stalled: MakeMKV started but no heartbeat/progress was recorded."
-                rip_details.append(
-                    f"No rip heartbeat was recorded for {int(quiet_seconds)}s after rip start."
-                )
 
     return {
         "rip": {
@@ -731,10 +744,12 @@ def main() -> int:
             menu_analysis = _load_json_file(staging_job_root / "menu_analysis" / "menu_analysis.json")
             bundle_association = _load_json_file(staging_job_root / "menu_analysis" / "bundle_association.json")
             dvdnav_menu = _load_json_file(staging_job_root / "dvdnav_menu" / "dvdnav_menu.json")
+            progress_row = get_progress(conn, args.job_id)
             review_state = _build_review_state(
                 cfg=cfg,
                 job=job,
                 logs=logs,
+                progress_row=progress_row,
                 selected_media=selected_media,
                 selected_movies=[dict(r) for r in selected_movies],
                 tmdb_rows=tmdb_rows,
@@ -746,7 +761,7 @@ def main() -> int:
             progress_state = _build_progress_state(
                 cfg=cfg,
                 job=job,
-                logs=logs,
+                progress_row=progress_row,
                 output_rows=output_rows,
                 job_id=args.job_id,
             )
