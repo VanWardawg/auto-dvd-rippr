@@ -45,7 +45,9 @@ a `#[tauri::command]` in `main.rs` that shells to it → add a wrapper in
 | `db.py` | Schema, migrations, connection setup |
 | `state.py` | Job state machine and transition validation |
 | `pipeline.py` | Stage orchestration; the top-level `run_pipeline_for_job` |
-| `rip.py` | Drive discovery, MakeMKV invocation, title selection, ffprobe |
+| `rip.py` | Drive discovery, MakeMKV invocation, ffprobe, eject |
+| `makemkv.py` | Robot-output parsing and title-selection heuristics (pure, unit-tested) |
+| `progress.py` | The `job_progress` table: one upserted row per job |
 | `tmdb.py` | TMDB search, candidate scoring, selection |
 | `mapper.py` | Title→episode mapping, DVD menu analysis, OCR (largest file) |
 | `splitter.py` | Splitting combined episodes on chapter boundaries |
@@ -80,6 +82,11 @@ TV and movie jobs take different paths: **TV identifies before ripping**
   the job's status in the DB and abort if it left the expected state — see
   `_job_is_still_ripping` in `rip.py`.
 - Progress goes in the `job_progress` table, not into log messages.
+- **`--minlength` must match between the disc scan and the rip.** MakeMKV
+  renumbers titles after length filtering, so scanning with one value and
+  ripping with another makes selected title IDs point at different titles.
+- Boolean config keys need coercion in `App.tsx` (`BOOLEAN_CONFIG_KEYS`)
+  because the settings form stores every field as a string.
 - Config keys are added in three places: `config.py` (`AppConfig` +
   validation), `app/config.example.json`, and the Settings tab in `App.tsx`.
 

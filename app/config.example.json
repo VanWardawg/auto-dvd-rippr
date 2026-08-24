@@ -16,5 +16,9 @@
   "collision_policy": "skip",
   "min_episode_minutes": 10.0,
   "max_episode_minutes": 90.0,
+  "rip_title_selection": "auto",
+  "rip_min_title_seconds": 120,
+  "disc_scan_timeout_seconds": 300,
+  "eject_after_rip": false,
   "show_overrides": {}
 }

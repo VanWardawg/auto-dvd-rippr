@@ -14,6 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from .config import AppConfig
+from .makemkv import (
+    PROGRESS_MAX,
+    build_title_candidates,
+    overall_fraction,
+    parse_progress_line,
+    select_titles,
+)
 from .progress import clear_progress, upsert_progress
 from .logger import get_logger
 from .state import append_job_log, get_job
@@ -86,6 +93,38 @@ def discover_optical_drives() -> list[dict[str, Any]]:
             }
         )
     return results
+
+
+def eject_drive(optical_drive: str | None) -> bool:
+    """
+    Open the drive tray so the next disc can go straight in.
+
+    Uses the Windows MCI interface via ctypes rather than shelling out, so no
+    console window flashes and no extra dependency is needed. Returns False
+    rather than raising: failing to eject must never fail a completed rip.
+    """
+    if platform.system().lower() != "windows":
+        return False
+
+    try:
+        import ctypes  # Windows-specific runtime call
+
+        alias = "autorippr_eject"
+        letter = (optical_drive or "").strip().rstrip("\/")
+        if letter:
+            open_cmd = f"open {letter} type cdaudio alias {alias}"
+        else:
+            open_cmd = f"open cdaudio alias {alias}"
+
+        mci = ctypes.windll.winmm.mciSendStringW
+        if mci(open_cmd, None, 0, None) != 0:
+            return False
+        try:
+            return mci(f"set {alias} door open", None, 0, None) == 0
+        finally:
+            mci(f"close {alias}", None, 0, None)
+    except Exception:
+        return False
 
 
 def get_makemkv_status(makemkv_path: str) -> dict[str, Any]:
@@ -219,7 +258,8 @@ def execute_rip_job(
         disc_info_text, disc_info_by_title = _read_makemkv_disc_info(
             makemkv_path=cfg.makemkv_path,
             source_spec=source_spec,
-            timeout_seconds=min(cfg.rip_timeout_seconds, 45),
+            timeout_seconds=_disc_scan_timeout_seconds(cfg, optical_drive),
+            min_title_seconds=cfg.rip_min_title_seconds,
         )
         if disc_info_text:
             (log_dir / "makemkv_disc_info.log").write_text(disc_info_text, encoding="utf-8")
@@ -241,6 +281,9 @@ def execute_rip_job(
                 to_status=None,
             )
         conn.commit()
+
+        selection = _plan_title_selection(conn, cfg, job_id, disc_info_by_title)
+
         _ensure_job_still_ripping(conn, job_id)
         append_job_log(
             conn=conn,
@@ -259,6 +302,8 @@ def execute_rip_job(
             log_path=makemkv_log_path,
             source_spec=source_spec,
             timeout_seconds=cfg.rip_timeout_seconds,
+            title_ids=selection,
+            min_title_seconds=cfg.rip_min_title_seconds,
         )
         log_already_written = True
         if exit_code != 0:
@@ -296,7 +341,26 @@ def execute_rip_job(
         from_status=None,
         to_status=None,
     )
+    # The rip stage is over; leave no stale progress for the UI to show while
+    # the job moves on to identify/map.
+    clear_progress(conn, job_id)
     conn.commit()
+
+    if not mock and cfg.eject_after_rip:
+        ejected = eject_drive(optical_drive)
+        append_job_log(
+            conn=conn,
+            job_id=job_id,
+            level="INFO" if ejected else "WARNING",
+            message=(
+                f"Ejected {optical_drive or 'optical drive'} after rip."
+                if ejected
+                else f"Could not eject {optical_drive or 'optical drive'} after rip."
+            ),
+            from_status=None,
+            to_status=None,
+        )
+        conn.commit()
 
     return {
         "job_id": job_id,
@@ -375,6 +439,80 @@ def recover_completed_rip(conn, cfg: AppConfig, job_id: str) -> dict[str, Any] |
     }
 
 
+def _plan_title_selection(
+    conn,
+    cfg: AppConfig,
+    job_id: str,
+    disc_info_by_title: dict[int, dict[str, Any]],
+) -> list[int] | None:
+    """
+    Decide which titles to rip. None means "everything" (the fast path).
+
+    Ripping every title MakeMKV offers is the single largest avoidable cost in
+    a collection migration: trailers, studio logos, language variants and
+    "play all" tracks routinely add more data than the content itself.
+    """
+    if cfg.rip_title_selection == "all":
+        return None
+    if not disc_info_by_title:
+        append_job_log(
+            conn=conn,
+            job_id=job_id,
+            level="WARNING",
+            message="No disc-info title data; ripping all titles.",
+            from_status=None,
+            to_status=None,
+        )
+        conn.commit()
+        return None
+
+    job = get_job(conn, job_id) or {}
+    candidates = build_title_candidates(disc_info_by_title)
+    selection = select_titles(
+        candidates,
+        media_type=str(job.get("media_type") or "tv"),
+        movie_mode=str(job.get("movie_mode") or "single"),
+        min_episode_minutes=cfg.min_episode_minutes,
+        max_episode_minutes=cfg.max_episode_minutes,
+    )
+
+    append_job_log(
+        conn=conn,
+        job_id=job_id,
+        level="INFO",
+        message=f"Title selection: {selection.reason}",
+        from_status=None,
+        to_status=None,
+    )
+    if selection.skipped:
+        append_job_log(
+            conn=conn,
+            job_id=job_id,
+            level="INFO",
+            message="Skipping " + "; ".join(selection.skipped),
+            from_status=None,
+            to_status=None,
+        )
+    conn.commit()
+
+    if selection.is_everything or not selection.title_ids:
+        return None
+    return selection.title_ids
+
+
+def _disc_scan_timeout_seconds(cfg: AppConfig, optical_drive: str | None) -> int:
+    """
+    How long to allow the pre-rip disc scan.
+
+    A DVD scan finishes in seconds. A Blu-ray scan routinely takes one to three
+    minutes because MakeMKV has to walk the playlist structure -- the previous
+    45s cap meant Blu-ray scans timed out, which silently discarded all title
+    metadata and forced a rip-everything fallback on exactly the discs where
+    ripping everything is most expensive.
+    """
+    return int(min(cfg.rip_timeout_seconds, cfg.disc_scan_timeout_seconds))
+
+
 def _run_makemkv_rip_streaming(
     conn,
     job_id: str,
@@ -383,53 +521,54 @@ def _run_makemkv_rip_streaming(
     log_path: Path,
     source_spec: str,
     timeout_seconds: int,
+    title_ids: list[int] | None = None,
+    min_title_seconds: int = 120,
 ) -> tuple[str, int]:
     makemkv = _resolve_makemkv_cli_path(makemkv_path)
     if not makemkv.exists():
         raise RipError(f"MakeMKV executable not found: {makemkv_path}")
 
-    cmd = [
-        str(makemkv),
-        "-r",
-        "--progress=-same",
-        "mkv",
-        source_spec,
-        "all",
-        str(output_dir),
-    ]
-    log.info("running makemkv", extra={"command": " ".join(cmd)})
+    # One command per selected title, or a single "all" pass when we want the
+    # whole disc. --minlength must match the value used for the disc-info scan:
+    # MakeMKV renumbers titles after length filtering, so a different value
+    # here would make the selected title IDs point at different titles.
+    selectors: list[str] = [str(t) for t in title_ids] if title_ids else ["all"]
+
     start = time.monotonic()
-    next_heartbeat = start + 15.0
-    try:
-        with open(log_path, "w", encoding="utf-8") as lf:
+    exit_code = 0
+
+    with open(log_path, "w", encoding="utf-8") as lf:
+        for index, selector in enumerate(selectors, start=1):
+            _ensure_job_still_ripping(conn, job_id)
+            cmd = [
+                str(makemkv),
+                "-r",
+                "--progress=-same",
+                f"--minlength={min_title_seconds}",
+                "mkv",
+                source_spec,
+                selector,
+                str(output_dir),
+            ]
+            log.info("running makemkv", extra={"command": " ".join(cmd)})
             lf.write(f"COMMAND: {' '.join(cmd)}\n\n")
             lf.flush()
-            proc = subprocess.Popen(
-                cmd,
-                stdout=lf,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            while True:
-                now = time.monotonic()
-                if not _job_is_still_ripping(conn, job_id):
-                    proc.kill()
-                    raise RipError(f"Rip cancelled or no longer active for job {job_id}.")
-                if now >= next_heartbeat:
-                    _emit_rip_heartbeat(conn, job_id, output_dir)
-                    next_heartbeat = now + 15.0
-                if proc.poll() is not None:
-                    break
-                if now - start > timeout_seconds:
-                    proc.kill()
-                    raise RipError(f"MakeMKV timed out after {timeout_seconds}s.")
-                time.sleep(1.0)
 
-            exit_code = int(proc.returncode or 0)
+            exit_code = _stream_one_makemkv_rip(
+                conn=conn,
+                job_id=job_id,
+                cmd=cmd,
+                log_file=lf,
+                output_dir=output_dir,
+                started_at=start,
+                timeout_seconds=timeout_seconds,
+                title_index=index,
+                title_count=len(selectors),
+            )
             lf.write(f"\nEXIT_CODE: {exit_code}\n")
             lf.flush()
-    except OSError as exc:
-        raise RipError(f"Failed to execute MakeMKV: {exc}") from exc
+            if exit_code != 0:
+                break
 
     log_text = ""
     try:
@@ -437,6 +576,139 @@ def _run_makemkv_rip_streaming(
     except OSError:
         log_text = ""
     return log_text, exit_code
+
+
+def _stream_one_makemkv_rip(
+    conn,
+    job_id: str,
+    cmd: list[str],
+    log_file,
+    output_dir: Path,
+    started_at: float,
+    timeout_seconds: int,
+    title_index: int,
+    title_count: int,
+) -> int:
+    """
+    Run one MakeMKV command, teeing its robot output to the log while turning
+    it into structured progress.
+
+    MakeMKV reports exact progress on stdout (PRGV) along with the name of the
+    operation it is performing (PRGC). Reading it is both more accurate and
+    more responsive than the previous approach of measuring the output
+    directory's size every 15 seconds.
+    """
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as exc:
+        raise RipError(f"Failed to execute MakeMKV: {exc}") from exc
+
+    operation = ""
+    fraction = 0.0
+    next_flush = 0.0
+    last_size_mb = 0.0
+    last_size_at = time.monotonic()
+    rate_mb_s: float | None = None
+
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            log_file.write(line)
+
+            now = time.monotonic()
+            if now - started_at > timeout_seconds:
+                proc.kill()
+                raise RipError(f"MakeMKV timed out after {timeout_seconds}s.")
+
+            event = parse_progress_line(line)
+            if event is not None:
+                if event.kind == "current_op" and event.text:
+                    operation = event.text
+                elif event.kind == "values":
+                    computed = overall_fraction(event)
+                    if computed is not None:
+                        fraction = computed
+
+            # Throttle: MakeMKV emits progress many times a second, and every
+            # write here is a database commit competing with the UI's polling.
+            if now < next_flush:
+                continue
+            next_flush = now + 1.0
+            log_file.flush()
+
+            if not _job_is_still_ripping(conn, job_id):
+                proc.kill()
+                raise RipError(f"Rip cancelled or no longer active for job {job_id}.")
+
+            size_mb = _output_size_mb(output_dir)
+            elapsed_since = max(0.001, now - last_size_at)
+            if size_mb > last_size_mb:
+                rate_mb_s = (size_mb - last_size_mb) / elapsed_since
+                last_size_mb = size_mb
+                last_size_at = now
+
+            elapsed = now - started_at
+            eta_seconds = None
+            if fraction > 0.01:
+                eta_seconds = max(0.0, elapsed * (1.0 - fraction) / fraction)
+
+            detail = operation or "Ripping"
+            if title_count > 1:
+                detail = f"{detail} (title {title_index} of {title_count})"
+            if size_mb > 0:
+                detail = f"{detail} - {size_mb:,.0f} MB written"
+
+            # Progress is reported against MakeMKV's own scale, and spread
+            # across however many titles this rip covers.
+            per_title = 1.0 / max(1, title_count)
+            overall = ((title_index - 1) + fraction) * per_title
+
+            upsert_progress(
+                conn,
+                job_id,
+                stage="ripping",
+                kind="ripping",
+                current_units=round(overall * PROGRESS_MAX, 2),
+                total_units=float(PROGRESS_MAX),
+                unit="ticks",
+                rate_per_second=rate_mb_s,
+                eta_seconds=eta_seconds,
+                detail=detail,
+                title_index=title_index,
+                title_count=title_count,
+            )
+            conn.execute(
+                "UPDATE jobs SET updated_at = ? WHERE id = ?",
+                (datetime.now(timezone.utc).isoformat(), job_id),
+            )
+            conn.commit()
+    finally:
+        if proc.stdout is not None:
+            proc.stdout.close()
+
+    return int(proc.wait() or 0)
+
+
+def _output_size_mb(output_dir: Path) -> float:
+    total_bytes = 0
+    try:
+        entries = list(output_dir.glob("*"))
+    except OSError:
+        return 0.0
+    for entry in entries:
+        try:
+            total_bytes += int(entry.stat().st_size)
+        except OSError:
+            continue
+    return total_bytes / (1024 * 1024)
 
 
 def _describe_makemkv_failure(log_text: str, log_path: Path) -> str:
@@ -552,35 +824,6 @@ def _month_name_to_number(value: str) -> int | None:
     return None
 
 
-def _emit_rip_heartbeat(conn, job_id: str, output_dir: Path) -> None:
-    files = list(output_dir.glob("*"))
-    count = len(files)
-    total_bytes = 0
-    latest_mtime = None
-    for f in files:
-        try:
-            st = f.stat()
-        except OSError:
-            continue
-        total_bytes += int(st.st_size)
-        latest_mtime = st.st_mtime if latest_mtime is None else max(latest_mtime, st.st_mtime)
-    mb = round(total_bytes / (1024 * 1024), 1)
-    upsert_progress(
-        conn,
-        job_id,
-        stage="ripping",
-        kind="ripping",
-        current_units=mb,
-        unit="mb",
-        detail=f"Ripping {mb:.1f} MB across {count} file(s)",
-    )
-    conn.execute(
-        "UPDATE jobs SET updated_at = ? WHERE id = ?",
-        (datetime.now(timezone.utc).isoformat(), job_id),
-    )
-    conn.commit()
-
-
 def _ensure_job_still_ripping(conn, job_id: str) -> None:
     if not _job_is_still_ripping(conn, job_id):
         raise RipError(f"Rip cancelled or no longer active for job {job_id}.")
@@ -597,11 +840,15 @@ def _read_makemkv_disc_info(
     makemkv_path: str,
     source_spec: str,
     timeout_seconds: int,
+    min_title_seconds: int = 120,
 ) -> tuple[str, dict[int, dict[str, Any]]]:
     makemkv = _resolve_makemkv_cli_path(makemkv_path)
     if not makemkv.exists():
         return "", {}
-    cmd = [str(makemkv), "-r", "info", source_spec]
+    # --minlength must match the value the rip uses. MakeMKV numbers titles
+    # after length filtering, so scanning with one value and ripping with
+    # another would make the selected title IDs refer to different titles.
+    cmd = [str(makemkv), "-r", f"--minlength={min_title_seconds}", "info", source_spec]
     try:
         proc = subprocess.run(
             cmd,

@@ -306,7 +306,28 @@ function buildConfigDraft(config?: Record<string, unknown> | null) {
     nas_root: String(source.nas_root ?? ""),
     default_order_mode: String(source.default_order_mode ?? "aired"),
     collision_policy: String(source.collision_policy ?? "skip"),
+    rip_title_selection: String(source.rip_title_selection ?? "auto"),
+    eject_after_rip: String(source.eject_after_rip ?? false),
   };
+}
+
+/**
+ * Config keys the backend expects as real booleans.
+ *
+ * The settings form keeps every field as a string, so these must be converted
+ * back before saving -- otherwise the JSON stores "false", which is truthy on
+ * the Python side.
+ */
+const BOOLEAN_CONFIG_KEYS = ["eject_after_rip"];
+
+function coerceConfigDraft(draft: Record<string, string>): Record<string, unknown> {
+  const coerced: Record<string, unknown> = { ...draft };
+  for (const key of BOOLEAN_CONFIG_KEYS) {
+    if (key in coerced) {
+      coerced[key] = String(coerced[key]) === "true";
+    }
+  }
+  return coerced;
 }
 
 function createCardId() {
@@ -409,7 +430,7 @@ export default function App() {
     await runAction("Saving settings", async () => {
       const next = await saveRuntimeConfig({
         ...(configState?.config ?? {}),
-        ...configDraft,
+        ...coerceConfigDraft(configDraft),
       });
       setConfigState(next);
       setConfigReady(next.validation.ok);
@@ -1827,6 +1848,30 @@ export default function App() {
                           <option value="skip">Skip</option>
                           <option value="overwrite">Overwrite</option>
                         </select>
+                      </label>
+                      <label>
+                        <span>Titles to rip</span>
+                        <select
+                          value={configDraft.rip_title_selection ?? "auto"}
+                          onChange={(e) => setConfigDraft((value) => ({ ...value, rip_title_selection: e.target.value }))}
+                        >
+                          <option value="auto">Only what is needed (recommended)</option>
+                          <option value="all">Every title on the disc</option>
+                        </select>
+                        <small>
+                          Auto skips trailers, logos, and "play all" tracks, which is usually most of a disc.
+                        </small>
+                      </label>
+                      <label>
+                        <span>Eject when a rip finishes</span>
+                        <select
+                          value={configDraft.eject_after_rip ?? "false"}
+                          onChange={(e) => setConfigDraft((value) => ({ ...value, eject_after_rip: e.target.value }))}
+                        >
+                          <option value="false">Leave the disc in the drive</option>
+                          <option value="true">Eject automatically</option>
+                        </select>
+                        <small>Useful with continuous mode when working through a stack of discs.</small>
                       </label>
                     </div>
                     <div className="artifact-list">

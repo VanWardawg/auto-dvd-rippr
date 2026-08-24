@@ -28,6 +28,7 @@ ENV_OVERRIDES = {
 VALID_LIBRARY_TYPES = {"tv", "movies", "both"}
 VALID_ORDER_MODES = {"aired", "dvd", "absolute"}
 VALID_COLLISION_POLICIES = {"skip", "overwrite"}
+VALID_TITLE_SELECTION_MODES = {"auto", "all"}
 
 
 class ConfigError(ValueError):
@@ -42,6 +43,27 @@ def _is_blank_or_placeholder(value: Any) -> bool:
         return True
     upper = normalized.upper()
     return upper.startswith("REPLACE_WITH_") or upper.startswith("YOUR_")
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """
+    Coerce a config value to bool, tolerating strings.
+
+    The settings UI round-trips every field as text, so a checkbox can arrive
+    as the string "false" -- which is truthy in Python. Parse it properly
+    rather than trusting bool().
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("true", "1", "yes", "on"):
+            return True
+        if normalized in ("false", "0", "no", "off", ""):
+            return False
+    return default
 
 
 @dataclass(frozen=True)
@@ -64,6 +86,19 @@ class AppConfig:
     transfer_retry_count: int = 3
     transfer_backoff_seconds: int = 3
     collision_policy: str = "skip"
+    # "auto" picks the titles worth ripping from the disc scan; "all" restores
+    # the previous behaviour of ripping every title MakeMKV reports.
+    rip_title_selection: str = "auto"
+    # Titles shorter than this are ignored entirely. Must be used identically
+    # for the disc scan and the rip -- MakeMKV renumbers titles after
+    # filtering, so a mismatch would shift the selected title IDs.
+    rip_min_title_seconds: int = 120
+    # Blu-ray playlist scans routinely take 1-3 minutes; the old hard-coded
+    # 45s cap timed them out and discarded the title metadata.
+    disc_scan_timeout_seconds: int = 300
+    # Eject the disc when a rip finishes, so a migration session becomes
+    # "swap disc, repeat" instead of "go click something".
+    eject_after_rip: bool = False
 
 
 def load_config(config_path: str) -> AppConfig:
@@ -116,6 +151,12 @@ def load_config(config_path: str) -> AppConfig:
             "Invalid collision_policy. Expected one of: skip, overwrite."
         )
 
+    title_selection = str(merged.get("rip_title_selection", "auto")).strip().lower()
+    if title_selection not in VALID_TITLE_SELECTION_MODES:
+        raise ConfigError(
+            "Invalid rip_title_selection. Expected one of: auto, all."
+        )
+
     staging_root = str(merged["staging_root"]).strip()
     db_path = str(merged.get("db_path") or Path(staging_root) / "autorippr.db")
     log_path = str(merged.get("log_path") or Path(staging_root) / "autorippr.log")
@@ -139,5 +180,9 @@ def load_config(config_path: str) -> AppConfig:
         transfer_retry_count=int(merged.get("transfer_retry_count", 3)),
         transfer_backoff_seconds=int(merged.get("transfer_backoff_seconds", 3)),
         collision_policy=collision_policy,
+        rip_title_selection=title_selection,
+        rip_min_title_seconds=int(merged.get("rip_min_title_seconds", 120)),
+        disc_scan_timeout_seconds=int(merged.get("disc_scan_timeout_seconds", 300)),
+        eject_after_rip=_as_bool(merged.get("eject_after_rip"), False),
     )
 

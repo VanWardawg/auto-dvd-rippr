@@ -23,12 +23,12 @@ Branch: `feat/hardening-and-rip-improvements`
 - [x] Single-source the version from the git tag
 - [x] Drop the legacy tkinter GUI and exclude Tcl/Tk from the bundle
 
-### Track 2 — Ripping quality (highest user-facing value)
+### Track 2 — Ripping quality (highest user-facing value)  ✅ complete
 
-- [ ] Select which titles to rip instead of `makemkvcon mkv ... all`
-- [ ] Give the Blu-ray disc scan its own, longer timeout
-- [ ] Parse MakeMKV robot progress (`PRGV`/`PRGC`/`PRGT`) instead of polling directory size
-- [ ] Eject the disc when a rip finishes
+- [x] Select which titles to rip instead of `makemkvcon mkv ... all`
+- [x] Give the Blu-ray disc scan its own, longer timeout
+- [x] Parse MakeMKV robot progress (`PRGV`/`PRGC`/`PRGT`) instead of polling directory size
+- [x] Eject the disc when a rip finishes
 
 ### Track 3 — Concurrency and state  ✅ complete
 
