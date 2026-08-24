@@ -1,0 +1,16 @@
+# Auto-Ripper backend runtime dependencies.
+#
+# The backend is intentionally standard-library only. This keeps the
+# PyInstaller bundle small, avoids supply-chain surface in a desktop app that
+# users download from GitHub Releases, and means `python app/main.py` works on
+# a clean Python 3.11 install with no `pip install` step.
+#
+# External functionality is provided by *detected system tools*, not Python
+# packages -- see README.md ("External tools"):
+#   * MakeMKV (makemkvcon)  - disc reading and decryption
+#   * ffmpeg / ffprobe      - title probing and episode splitting
+#   * tesseract (optional)  - DVD menu OCR
+#   * dvd-archaeology       - optional DVD menu extraction, invoked as a
+#                             separate interpreter, never imported in-process
+#
+# If a real runtime dependency is ever added, pin it here with `==`.

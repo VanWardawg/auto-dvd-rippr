@@ -1,22 +1,51 @@
+# --- Python ---
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
 
+# --- Node / frontend ---
 node_modules/
 frontend/dist/
+frontend/temp/
+
+# --- Rust / Tauri build output ---
 frontend/src-tauri/target/
 frontend/src-tauri/target-*/
 
-.env
-.env.*
-
-app/config.local.json
+# --- Bundled runtime resources (produced by `npm run build:backend`) ---
 frontend/src-tauri/resources/backend/*
 !frontend/src-tauri/resources/backend/.gitkeep
 frontend/src-tauri/resources/config/*
 !frontend/src-tauri/resources/config/.gitkeep
-*.db
-*.log
 
+# --- Secrets and local configuration ---
+# config.example.json is the only config that belongs in version control.
+# Every other config variant may contain a real TMDB API key or private
+# NAS paths, so they are ignored by default.
+.env
+.env.*
+app/config.json
+app/config.local.json
+app/config.*.json
+!app/config.example.json
+config.json
+config.local.json
+*.key
+*.pem
+secrets.json
+
+# --- Runtime state (databases, logs, staging artifacts) ---
+*.db
+*.db-wal
+*.db-shm
+*.log
+staging/
+
+# --- OS noise ---
 Thumbs.db
 .DS_Store
+desktop.ini

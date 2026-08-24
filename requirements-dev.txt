@@ -1,0 +1,8 @@
+# Build and development dependencies for Auto-Ripper.
+#
+# Pinned exactly so that release builds are reproducible: the version used in
+# CI (.github/workflows/release.yml) must match what maintainers run locally.
+#
+#   py -3.11 -m pip install -r requirements-dev.txt
+
+PyInstaller==6.22.0
