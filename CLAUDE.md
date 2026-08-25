@@ -119,9 +119,12 @@ cd frontend && npm run build:self-contained && npm run tauri -- build
 ### Gotchas
 
 - **Dev vs. bundled backend:** `resolve_runtime_paths()` in `main.rs` prefers
-  `app/main.py` in debug builds and the PyInstaller exe in release builds. If
-  backend changes seem to have no effect, you are probably running a stale
-  bundled exe.
+  `app/main.py` in debug builds and the PyInstaller exe in release builds. So a
+  backend fix is live in `tauri dev` immediately while the bundled exe still
+  carries the bug -- the dev app looks correct and the installer ships broken.
+  `beforeBuildCommand` therefore runs `build:self-contained`, so a release
+  build always regenerates the backend and cannot package a stale one. Do not
+  weaken that back to `npm run build`.
 - **User config is not repo config.** The app reads
   `%APPDATA%\Auto-Ripper\config.json`, seeded from `config.example.json`.
   Editing `app/config.json` only affects direct CLI runs.

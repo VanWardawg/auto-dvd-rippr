@@ -53,10 +53,6 @@ jobs:
             Write-Host "Ref '$ref' is not a release tag; keeping the committed version."
           }
 
-      - name: Build self-contained assets
-        working-directory: frontend
-        run: npm run build:self-contained
-
       - name: Build Tauri release bundle
         working-directory: frontend
         run: npm run tauri -- build

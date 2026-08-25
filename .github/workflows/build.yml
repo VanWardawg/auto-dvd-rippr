@@ -38,14 +38,6 @@ jobs:
         working-directory: frontend
         run: npm run check:commands
 
-      - name: Build frontend
-        working-directory: frontend
-        run: npm run build
-
-      - name: Build bundled backend
-        working-directory: frontend
-        run: npm run build:backend
-
       - name: Build Tauri bundle
         working-directory: frontend
         run: npm run tauri -- build

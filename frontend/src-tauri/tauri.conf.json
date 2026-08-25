@@ -5,7 +5,7 @@
   "identifier": "com.autorippr.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build:self-contained",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
