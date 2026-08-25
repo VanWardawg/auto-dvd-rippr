@@ -130,16 +130,20 @@ cd frontend && npm run build:self-contained && npm run tauri -- build
 - **`tkinter` is deliberately excluded** from the PyInstaller bundle. Do not
   import it in backend code — the legacy Tk GUI was removed because it pulled
   ~20 MB of Tcl/Tk into every release.
-- **The repo lives under OneDrive, and its sync engine breaks release builds.**
-  `tauri build` compiles fine and then fails at the bundling step with
-  `failed to bundle project: Access is denied (os error 5)`, on a file no user
-  process holds -- the Restart Manager reports nothing, because it is the
-  cloud-files filter driver. `run-tauri.mjs` works around it by redirecting
-  `CARGO_TARGET_DIR` outside the sync root when it detects one, so build output
-  lands in `%LOCALAPPDATA%utorippr-build	arget`. Always build via
-  `npm run tauri -- build`, never `npx tauri build`, or you get the failure.
-  OneDrive is also the source of git's "dubious ownership" complaint. Moving
-  the checkout out of OneDrive would remove both problems.
+- **Do not keep the checkout in a cloud-synced folder.** This repo used to live
+  under OneDrive, and its cloud-files engine follows `target/` and holds files
+  open mid-build: `tauri build` compiled cleanly and then failed with
+  `failed to bundle project: Access is denied (os error 5)` on a file no user
+  process held -- the Windows Restart Manager reported nothing, because it is a
+  filter driver. It was also the source of git's "dubious ownership" error.
+  Both went away on moving the checkout out of the sync root.
+  `run-tauri.mjs` still detects a synced checkout and redirects
+  `CARGO_TARGET_DIR` outside it, so building from one works, but keeping the
+  repo out of sync in the first place is better -- it also stops gigabytes of
+  `node_modules` and `target` being uploaded.
+- Always build via `npm run tauri -- build`, not `npx tauri build`: the wrapper
+  supplies the local Tauri CLI when none is installed globally, and applies the
+  sync-folder redirect.
 
 ## Testing
 

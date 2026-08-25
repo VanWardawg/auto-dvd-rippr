@@ -198,8 +198,9 @@ that path had never been exercised.
   because the checkout is inside OneDrive and its cloud-files filter driver had
   the file open. `run-tauri.mjs` now redirects `CARGO_TARGET_DIR` outside the
   sync root when it detects one; CI and non-synced checkouts are unaffected.
-  Moving the checkout out of OneDrive would fix this and the git "dubious
-  ownership" error at the source.
+  The checkout was subsequently moved out of OneDrive, which fixed this and the
+  git "dubious ownership" error at the source; a release build from the new
+  location produces both bundles at the standard in-tree path that CI globs.
 - With that fixed, both bundles build: `.msi` and an NSIS `-setup.exe`.
 - The packaged app was launched and verified: window opens, config loads, all
   174 jobs list (so the bundled backend is genuinely being invoked), staging
