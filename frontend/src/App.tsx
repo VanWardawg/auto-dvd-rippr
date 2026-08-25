@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   detectDisc,
@@ -376,6 +376,11 @@ export default function App() {
   const [guidedReviewRows, setGuidedReviewRows] = useState<GuidedReviewRowDraft[]>([]);
   const [guidedSplitDrafts, setGuidedSplitDrafts] = useState<GuidedSplitDraft[]>([]);
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    const stored = window.localStorage.getItem("autorippr-theme");
+    if (stored === "light" || stored === "dark") return stored;
+    return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
   const selectedJobIdRef = useRef<string | null>(null);
   const jobsRef = useRef<JobSummary[]>([]);
   const driveCardsRef = useRef<DriveCardState[]>(driveCards);
@@ -485,6 +490,11 @@ export default function App() {
   useEffect(() => {
     busyActionRef.current = busyAction;
   }, [busyAction]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    window.localStorage.setItem("autorippr-theme", theme);
+  }, [theme]);
 
   useEffect(() => {
     void loadConfigState();
@@ -752,6 +762,16 @@ export default function App() {
       setBusyAction(null);
     }
   }
+
+  const featureRuntimeLabel = useMemo(() => {
+    const durations = (snapshot?.rip_titles ?? [])
+      .map((title) => title.duration_seconds ?? 0)
+      .filter((seconds) => seconds > 0);
+    if (!durations.length) return "-";
+    const minutes = Math.max(...durations) / 60;
+    if (minutes < 60) return `${Math.round(minutes)}m`;
+    return `${Math.floor(minutes / 60)}h ${Math.round(minutes % 60)}m`;
+  }, [snapshot]);
 
   const bundles = snapshot?.episode_mappings ?? [];
   const artifacts = useMemo(() => {
@@ -1046,9 +1066,6 @@ export default function App() {
           keys.push("resume");
           break;
         case "done":
-          if (hasLocalArtifacts) {
-            keys.push("clear-local");
-          }
           if (snapshot.job.media_type === "movie") {
             keys.push("rebuild-output", "rerun-identify");
           } else {
@@ -1245,47 +1262,48 @@ export default function App() {
         <div className="sidebar-header">
           <div>
             <h1>Auto-Ripper</h1>
-            <p>Desktop workflow for rip, map, split, and transfer.</p>
+            <p>{configReady ? "Ready" : "Setup required"}</p>
           </div>
           <div className="toolbar-actions">
-            <button className="ghost-button" onClick={() => setActiveTab("settings")}>
-              Settings
+            <button
+              className="icon-button"
+              title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+              aria-label="Toggle colour theme"
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            >
+              {theme === "dark" ? "\u2600" : "\u263D"}
             </button>
-            <button className="ghost-button" disabled={!configReady} onClick={() => void refreshJobs()}>
-              Refresh
+            <button
+              className={`icon-button ${activeTab === "settings" ? "active" : ""}`}
+              title="Settings"
+              aria-label="Settings"
+              onClick={() => setActiveTab("settings")}
+            >
+              {"\u2699"}
             </button>
           </div>
         </div>
 
-        <section className="app-controls-card">
-          <div className="section-header">
-            <h2>App</h2>
-            <span className={`status-pill status-${configReady ? "done" : "error"}`}>
-              {configReady ? "Ready" : "Setup needed"}
-            </span>
+        {!configReady ? (
+          <div className="review-banner review-banner-danger">
+            <div>
+              <strong>Setup required</strong>
+              <p>Add your tool paths and TMDB key before ripping.</p>
+            </div>
+            <div className="review-banner-actions">
+              <button className="primary-button" onClick={() => setActiveTab("settings")}>
+                Open Settings
+              </button>
+            </div>
           </div>
-          <div className="app-controls-grid">
-            <button className="primary-button" onClick={() => setActiveTab("settings")}>
-              Settings
-            </button>
-            <button disabled={busyAction !== null} onClick={() => void loadConfigState()}>
-              Reload Config
-            </button>
-            <button disabled={busyAction !== null} onClick={() => void autodetectConfig()}>
-              Auto-detect Tools
-            </button>
-            <button disabled={!configReady || busyAction !== null} onClick={() => void refreshJobs()}>
-              Refresh Jobs
-            </button>
+        ) : makemkvBlocking ? (
+          <div className="review-banner">
+            <div>
+              <strong>MakeMKV needs attention</strong>
+              <p>{makemkvStatus?.message}</p>
+            </div>
           </div>
-          {!configReady ? (
-            <p className="app-controls-note">
-              Complete Settings before ripping. The app will store everything in your user config automatically.
-            </p>
-          ) : makemkvBlocking ? (
-            <p className="app-controls-note">{makemkvStatus?.message}</p>
-          ) : null}
-        </section>
+        ) : null}
 
         <section className="start-card">
           <div className="section-header">
@@ -1508,11 +1526,21 @@ export default function App() {
 
         <section className="jobs-card">
           <div className="section-header">
-            <h2>Jobs</h2>
-            <span>{jobs.length}</span>
+            <h2>Jobs {jobs.length ? `(${jobs.length})` : ""}</h2>
+            <button
+              className="icon-button"
+              title="Refresh jobs"
+              aria-label="Refresh jobs"
+              disabled={!configReady || busyAction !== null}
+              onClick={() => void refreshJobs()}
+            >
+              {"\u21BB"}
+            </button>
           </div>
           {!configReady ? (
-            <div className="empty-state">Complete setup in Settings before jobs and disc actions will run.</div>
+            <div className="empty-state">Finish setup before jobs can run.</div>
+          ) : jobs.length === 0 ? (
+            <div className="empty-state">No jobs yet. Insert a disc to begin.</div>
           ) : null}
           <div className="job-list">
             {jobs.map((job) => (
@@ -1526,9 +1554,10 @@ export default function App() {
                   <span className={`status-pill status-${job.status}`}>{job.status}</span>
                 </div>
                 <div className="job-row-meta">
-                  <span>{job.media_type.toUpperCase()}</span>
-                  <span>{job.optical_drive ? `Drive ${job.optical_drive}` : "Auto drive"}</span>
-                  <span>{job.current_stage ?? job.status}</span>
+                  <span>
+                    {job.media_type === "tv" ? "TV" : "Movie"}
+                    {job.optical_drive ? ` \u00B7 ${job.optical_drive}` : ""}
+                  </span>
                   <span>{formatRelativeTime(job.updated_at)}</span>
                 </div>
               </button>
@@ -1544,14 +1573,35 @@ export default function App() {
               <div className="toolbar-title hero-title-block">
                 <h2 className="hero-title">{snapshot.job.disc_label}</h2>
                 {heroSubtitle ? <p className="hero-subtitle">{heroSubtitle}</p> : null}
-                {selectedTmdbSource ? <p>TMDB query source: {String(selectedTmdbSource)}</p> : null}
-                <p>{activityState} • last activity {formatRelativeTime(lastActivityAt)}</p>
+                <p className="hero-meta">
+                  <span>{activityState}</span>
+                  <span className="hero-meta-sep">|</span>
+                  <span>{formatRelativeTime(lastActivityAt)}</span>
+                  {snapshot.job.optical_drive ? (
+                    <>
+                      <span className="hero-meta-sep">|</span>
+                      <span>Drive {snapshot.job.optical_drive}</span>
+                    </>
+                  ) : null}
+                  {selectedTmdbSource ? (
+                    <>
+                      <span className="hero-meta-sep">|</span>
+                      <span>via {String(selectedTmdbSource)}</span>
+                    </>
+                  ) : null}
+                </p>
               </div>
               <div className="hero-actions">
                 {primaryActions.map((action, index) => (
                   <button
                     key={action.key}
-                    className={index === 0 ? "primary-button" : action.tone === "danger" ? "danger-button" : undefined}
+                    className={
+                      index === 0 && snapshot.job.status !== "done"
+                        ? "primary-button"
+                        : action.tone === "danger"
+                          ? "danger-button"
+                          : undefined
+                    }
                     disabled={action.disabled}
                     onClick={action.onClick}
                   >
@@ -1588,34 +1638,72 @@ export default function App() {
                 <strong>{progressPercent}%</strong>
                 <span className={`status-pill status-${snapshot.job.status}`}>{snapshot.job.current_stage ?? snapshot.job.status}</span>
               </div>
-              {progressState?.detail ? (
+              {progressState?.detail && snapshot.job.status !== "done" ? (
                 <div className="progress-detail">
                   <span>{progressState.detail}</span>
-                  {progressState.rate_mb_s ? <span>{progressState.rate_mb_s.toFixed(2)} MB/s</span> : null}
-                  {progressEta ? <span>{progressEta}</span> : null}
+                  {progressState.rate_mb_s ? (
+                    <>
+                      <span className="progress-detail-sep">|</span>
+                      <span>{progressState.rate_mb_s.toFixed(1)} MB/s</span>
+                    </>
+                  ) : null}
+                  {progressEta ? (
+                    <>
+                      <span className="progress-detail-sep">|</span>
+                      <span>{progressEta}</span>
+                    </>
+                  ) : null}
+                  {progressState.title_count && progressState.title_count > 1 ? (
+                    <>
+                      <span className="progress-detail-sep">|</span>
+                      <span>
+                        title {progressState.title_index} of {progressState.title_count}
+                      </span>
+                    </>
+                  ) : null}
                 </div>
               ) : null}
-              {stageDuration || (stageProgressPercent !== null && snapshot.job.status !== "done") ? (
+              {snapshot.job.status !== "done" &&
+              (stageDuration || stageProgressPercent !== null) ? (
                 <div className="stage-substatus">
                   {stageDuration ? <span>{stageDuration}</span> : null}
-                  {stageProgressPercent !== null && snapshot.job.status !== "done" ? <span>{stageProgressPercent}% through stage</span> : null}
+                  {stageProgressPercent !== null ? <span>{stageProgressPercent}% through stage</span> : null}
                 </div>
               ) : null}
-              <div className="progress-bar-track">
-                <div className="progress-bar-fill" style={{ width: `${progressPercent}%` }} />
+              <div
+                className="progress-bar-track"
+                role="progressbar"
+                aria-valuenow={progressPercent}
+                aria-valuemin={0}
+                aria-valuemax={100}
+              >
+                <div
+                  className={`progress-bar-fill ${
+                    snapshot.job.status === "done"
+                      ? "is-done"
+                      : snapshot.job.status === "error"
+                        ? "is-error"
+                        : activityState === "Working"
+                          ? "is-active"
+                          : ""
+                  }`}
+                  style={{ width: `${progressPercent}%` }}
+                />
               </div>
               <div className="stage-list">
-                {pipelineStages.map((stage) => {
-                  const stageIndex = pipelineStages.indexOf(stage);
+                {pipelineStages.map((stage, stageIndex) => {
                   const completed = currentStageIndex >= stageIndex;
                   const active = snapshot.job.status === stage;
                   return (
-                    <span
-                      key={stage}
-                      className={`stage-pill ${completed ? "is-complete" : ""} ${active ? "is-active" : ""}`}
-                    >
-                      {stage}
-                    </span>
+                    <Fragment key={stage}>
+                      {stageIndex > 0 ? (
+                        <span className={`stage-connector ${completed ? "is-complete" : ""}`} />
+                      ) : null}
+                      <span className={`stage-step ${completed ? "is-complete" : ""} ${active ? "is-active" : ""}`}>
+                        <span className="stage-step-dot" />
+                        {stage}
+                      </span>
+                    </Fragment>
                   );
                 })}
               </div>
@@ -1708,23 +1796,22 @@ export default function App() {
           </div>
         ) : null}
 
-        <div className="tabs">
-          <button className={showSettingsTab ? "active" : ""} onClick={() => setActiveTab("settings")}>
-            Settings
-          </button>
-          <button className={activeTab === "overview" ? "active" : ""} onClick={() => setActiveTab("overview")}>
-            Overview
-          </button>
-          <button className={activeTab === "activity" ? "active" : ""} onClick={() => setActiveTab("activity")}>
-            Activity
-          </button>
-          <button className={activeTab === "artifacts" ? "active" : ""} onClick={() => setActiveTab("artifacts")}>
-            Artifacts
-          </button>
-          <button className={activeTab === "json" ? "active" : ""} onClick={() => setActiveTab("json")}>
-            Raw JSON
-          </button>
-        </div>
+        {!showSettingsTab ? (
+          <div className="tabs">
+            <button className={activeTab === "overview" ? "active" : ""} onClick={() => setActiveTab("overview")}>
+              Overview
+            </button>
+            <button className={activeTab === "activity" ? "active" : ""} onClick={() => setActiveTab("activity")}>
+              Activity
+            </button>
+            <button className={activeTab === "artifacts" ? "active" : ""} onClick={() => setActiveTab("artifacts")}>
+              Artifacts
+            </button>
+            <button className={activeTab === "json" ? "active" : ""} onClick={() => setActiveTab("json")}>
+              Raw JSON
+            </button>
+          </div>
+        ) : null}
 
         {showSettingsTab ? (
           <section className="panel settings-panel">
@@ -1733,7 +1820,14 @@ export default function App() {
                 <h3>{configReady ? "Settings" : "First-run setup"}</h3>
                 <p>{configState?.configPath ?? "Loading config path..."}</p>
               </div>
-              <span className={`status-pill status-${configReady ? "done" : "error"}`}>{configReady ? "ready" : "setup required"}</span>
+              <div className="toolbar-actions">
+                <span className={`status-pill status-${configReady ? "done" : "error"}`}>
+                  {configReady ? "ready" : "setup required"}
+                </span>
+                {configReady ? (
+                  <button onClick={() => setActiveTab("overview")}>Close</button>
+                ) : null}
+              </div>
             </div>
             {configLoading ? (
               <div className="empty-state">Loading configuration…</div>
@@ -1745,8 +1839,11 @@ export default function App() {
                     <p>{configState?.validation.message ?? "Unable to validate configuration."}</p>
                   </div>
                   <div className="review-banner-actions">
+                    <button disabled={busyAction !== null} onClick={() => void loadConfigState()}>
+                      Reload
+                    </button>
                     <button disabled={busyAction !== null} onClick={() => void autodetectConfig()}>
-                      Auto-detect
+                      Auto-detect tools
                     </button>
                   </div>
                 </div>
@@ -1950,21 +2047,43 @@ export default function App() {
         {activeTab === "overview" && snapshot && !showSettingsTab ? (
           <div className="panel-grid">
             <section className="panel metrics">
+              {snapshot.job.media_type === "tv" ? (
+                <>
+                  <div className="metric-card">
+                    <span>Scope</span>
+                    <strong>{snapshot.job.disc_scope ?? "unspecified"}</strong>
+                  </div>
+                  <div className="metric-card">
+                    <span>Season</span>
+                    <strong>{snapshot.job.season_number ?? "-"}</strong>
+                  </div>
+                  <div className="metric-card">
+                    <span>Episodes mapped</span>
+                    <strong>{snapshot.episode_mappings.length}</strong>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="metric-card">
+                    <span>Titles ripped</span>
+                    <strong>{snapshot.rip_titles.length}</strong>
+                  </div>
+                  <div className="metric-card">
+                    <span>Feature length</span>
+                    <strong>{featureRuntimeLabel}</strong>
+                  </div>
+                  <div className="metric-card">
+                    <span>Mode</span>
+                    <strong>{(snapshot.job.movie_mode ?? "single").replace(/_/g, " ")}</strong>
+                  </div>
+                </>
+              )}
               <div className="metric-card">
-                <span>Status</span>
-                <strong>{snapshot.job.status}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Scope</span>
-                <strong>{snapshot.job.disc_scope ?? "unspecified"}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Season</span>
-                <strong>{snapshot.job.season_number ?? "-"}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Outputs</span>
-                <strong>{snapshot.outputs.length}</strong>
+                <span>On NAS</span>
+                <strong>
+                  {snapshot.outputs.filter((o) => o.transfer_status === "done").length}
+                  {snapshot.outputs.length ? ` / ${snapshot.outputs.length}` : ""}
+                </strong>
               </div>
             </section>
 
@@ -2089,15 +2208,19 @@ export default function App() {
             </div>
             {recentLogs.length > 0 ? (
               <div className="log-list">
-                {recentLogs.map((logItem, index) => (
-                  <div key={`${logItem.timestamp}-${index}`} className={`log-row ${isLogWarning(logItem) ? "is-warning" : ""}`}>
-                    <div className="log-row-top">
-                      <strong>{logItem.level}</strong>
-                      <span>{formatRelativeTime(logItem.timestamp)}</span>
+                {recentLogs.map((logItem, index) => {
+                  const level = String(logItem.level || "INFO").toUpperCase();
+                  const tone = level === "ERROR" ? "is-error" : isLogWarning(logItem) ? "is-warning" : "";
+                  return (
+                    <div key={`${logItem.timestamp}-${index}`} className={`log-row ${tone}`}>
+                      <span className={`log-level ${tone || "is-info"}`}>{level}</span>
+                      <p className="log-message">{logItem.message}</p>
+                      <span className="log-time" title={logItem.timestamp}>
+                        {formatRelativeTime(logItem.timestamp)}
+                      </span>
                     </div>
-                    <p>{logItem.message}</p>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <div className="empty-state">No activity logs yet.</div>

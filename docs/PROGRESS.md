@@ -191,3 +191,27 @@ is exactly when the drive would otherwise be held for 35 minutes or overnight.
 
 Together: open tray, drop the next disc in, it starts. No UI interaction.
 Test suite grew from 91 to 97 cases.
+
+### 2026-08-24 — UI pass
+
+The interface had accumulated by addition: "Settings" appeared three times on
+screen, the job list sat below two other cards, and a finished job announced
+itself as complete in four separate places.
+
+- `styles.css` rebuilt on design tokens, with a light and a dark palette and a
+  theme toggle that persists. Every colour resolves from a token, so adding a
+  theme means adding a palette, not editing rules. Contrast was measured
+  rather than eyeballed: all text/background pairs now clear WCAG AA.
+- Sidebar reordered to header -> start disc -> jobs, with the job list
+  flexing to fill. The redundant "App" utility card is gone; its buttons moved
+  to where they belong (Settings in the header, Reload/Auto-detect inside
+  Settings, Refresh on the jobs list).
+- Job header shows the title, subtitle, and one metadata line instead of four
+  restatements of the same status.
+- Stage pills became a real stepper with connectors; the progress bar carries
+  a state colour and animates only while genuinely working.
+- Activity log is one dense row per entry rather than a card per entry.
+- Overview tiles adapt to media type -- movies were showing "Scope:
+  unspecified" and "Season: -" for half the row.
+- "Clear Local Artifacts" no longer receives the primary button on a finished
+  job; a destructive action was getting top billing purely by list position.
