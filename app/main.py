@@ -48,6 +48,22 @@ from autorippr.job_ops import (
 )
 
 
+# Columns SQLite stores as INTEGER but that mean true/false. The Rust layer
+# deserializes job rows into typed structs, so a raw 0 lands as
+# "invalid type: integer `0`, expected a boolean" and the whole job list fails
+# to parse -- the UI goes blank with no jobs. Normalize on the way out.
+JOB_BOOLEAN_COLUMNS = ("awaiting_review",)
+
+
+def _normalize_job_row(job: dict[str, Any]) -> dict[str, Any]:
+    """Give a job row JSON types the typed consumers expect."""
+    normalized = dict(job)
+    for column in JOB_BOOLEAN_COLUMNS:
+        if column in normalized:
+            normalized[column] = bool(normalized[column])
+    return normalized
+
+
 def _load_json_file(path: Path):
     if not path.exists():
         return None
@@ -670,7 +686,7 @@ def main() -> int:
                 print("Job not found.", file=sys.stderr)
                 return 4
             logs = list_job_logs(conn, args.job_id)
-            print(json.dumps({"job": job, "logs": logs}, indent=2))
+            print(json.dumps({"job": _normalize_job_row(job), "logs": logs}, indent=2))
             return 0
 
         if args.job_command == "snapshot":
@@ -748,7 +764,7 @@ def main() -> int:
                 """,
                 (args.job_id,),
             ).fetchone()
-            job = _sync_movie_job_status(job, selected_media)
+            job = _normalize_job_row(_sync_movie_job_status(job, selected_media))
             selected_movies = conn.execute(
                 """
                 SELECT slot_index, tmdb_id, title, year, rip_title_id, created_at, updated_at
@@ -825,7 +841,7 @@ def main() -> int:
             return 0
 
         if args.job_command == "list":
-            jobs = list_jobs(conn)
+            jobs = [_normalize_job_row(job) for job in list_jobs(conn)]
             for job in jobs:
                 job["has_local_artifacts"] = _job_has_local_artifacts(cfg.staging_root, str(job["id"]))
             print(json.dumps({"jobs": jobs}, indent=2))
