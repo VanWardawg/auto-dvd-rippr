@@ -1436,3 +1436,58 @@ input::placeholder {
 .storage-strip.is-critical .storage-strip-top strong {
   color: var(--danger);
 }
+
+/* --------------------------------------------------------- settings view */
+
+/* Settings replaces the job view rather than stacking under it, so it carries
+   a header of its own with an unmissable way back. */
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 0.85rem;
+  margin-bottom: 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-header-title {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.settings-header-title h3 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.settings-header-title p {
+  margin: 0.15rem 0 0;
+  color: var(--text-faint);
+  font-size: 0.78rem;
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+.icon-button.is-active {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.storage-reclaim {
+  width: 100%;
+  margin-top: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.78rem;
+  background: transparent;
+  border-color: var(--border);
+  box-shadow: none;
+  color: var(--accent-text);
+}
+
+.storage-reclaim:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}

@@ -3,6 +3,7 @@ import csv
 import json
 import platform
 import re
+import shutil
 import subprocess
 import time
 import urllib.error
@@ -29,6 +30,10 @@ from .state import append_job_log, get_job
 log = get_logger("rip")
 
 MAKEMKV_BETA_KEY_URL = "https://forum.makemkv.com/forum/viewtopic.php?f=5&t=1053"
+
+# Ripping writes the selected titles, and finalizing can hold a second copy
+# briefly before the transfer clears it. Ask for more room than the raw size.
+SPACE_HEADROOM_FACTOR = 2.2
 
 
 class RipError(RuntimeError):
@@ -283,6 +288,7 @@ def execute_rip_job(
         conn.commit()
 
         selection = _plan_title_selection(conn, cfg, job_id, disc_info_by_title)
+        _ensure_space_for_rip(conn, cfg, job_id, disc_info_by_title, selection)
 
         _ensure_job_still_ripping(conn, job_id)
         append_job_log(
@@ -421,6 +427,50 @@ def recover_completed_rip(conn, cfg: AppConfig, job_id: str) -> dict[str, Any] |
             for t in titles
         ],
     }
+
+
+def _ensure_space_for_rip(
+    conn,
+    cfg: AppConfig,
+    job_id: str,
+    disc_info_by_title: dict[int, dict[str, Any]],
+    title_ids: list[int] | None,
+) -> None:
+    """
+    Refuse to start a rip that cannot fit, before spending the time on it.
+
+    MakeMKV reports each title's size during the disc scan, so the space a rip
+    needs is known before a byte is written. Discovering the shortfall an hour
+    in leaves a part-written file and a disc to rip again; saying so up front
+    costs nothing and names the fix.
+    """
+    if not disc_info_by_title:
+        return
+
+    try:
+        free_bytes = shutil.disk_usage(cfg.staging_root).free
+    except OSError:
+        return  # Cannot tell; let the rip try.
+
+    candidates = build_title_candidates(disc_info_by_title)
+    wanted = candidates if title_ids is None else [c for c in candidates if c.title_id in set(title_ids)]
+    needed = sum(c.size_bytes for c in wanted)
+    if needed <= 0:
+        return
+
+    # Ripping writes the titles, and finalizing may place a second copy before
+    # the transfer clears it, so require headroom rather than a bare fit.
+    required = int(needed * SPACE_HEADROOM_FACTOR)
+    if free_bytes >= required:
+        return
+
+    need_gb = required / (1024 ** 3)
+    free_gb = free_bytes / (1024 ** 3)
+    raise RipError(
+        f"Not enough space in {cfg.staging_root}: this disc needs about "
+        f"{need_gb:.1f} GB and {free_gb:.1f} GB is free. Free some space "
+        "(completed jobs can be cleared from the sidebar) and start the job again."
+    )
 
 
 def _plan_title_selection(

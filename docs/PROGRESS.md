@@ -225,6 +225,15 @@ itself as complete in four separate places.
   than describing the mechanism.
 - The sidebar carries a permanent staging capacity strip, turning red past 90%.
 - `clear_local_after_transfer` (default off) deletes the staged rip once the
-  NAS copy is confirmed. It deletes files only and keeps the database records,
+  NAS copy is confirmed.
+- Bulk reclaim: one action frees every completed job's staging, named with the
+  amount. Only finished jobs are touched -- an errored job may be one Resume
+  away from finishing, and clearing it would turn a retry into a re-rip.
+- A rip that cannot fit is refused before it starts, using the title sizes
+  MakeMKV reports during the disc scan.
+- The File menu (Settings / Reload Config / Quit) was removed: all three had
+  duplicates in the app, and the menu bar cost a strip of vertical space.
+- Settings is a full view rather than a panel stacked under the job progress,
+  with a back arrow, a Done button, and Escape to close. It deletes files only and keeps the database records,
   so the NAS path and checksum survive; the manual action still clears rows
   too, which is what it has always done.

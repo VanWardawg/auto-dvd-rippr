@@ -6,14 +6,18 @@ is the difference between a 20-minute and a 60-minute disc.
 """
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
+import autorippr.rip as rip  # noqa: E402
+from autorippr.config import AppConfig  # noqa: E402
 from autorippr.makemkv import (  # noqa: E402
     TitleCandidate,
     build_title_candidates,
@@ -189,6 +193,66 @@ class TvSelectionTests(unittest.TestCase):
     def test_empty_disc_returns_no_titles(self) -> None:
         selection = select_titles([], media_type="tv")
         self.assertEqual(selection.title_ids, [])
+
+
+class SpaceGuardTests(unittest.TestCase):
+    """
+    MakeMKV reports title sizes during the scan, so a rip that cannot fit is
+    knowable before it starts. Finding out an hour in leaves a part-written
+    file and a disc to rip over again.
+    """
+
+    def _cfg(self, staging: str) -> AppConfig:
+        return AppConfig(
+            tmdb_api_key="k", makemkv_path="x", ffmpeg_path="x", ffprobe_path="x",
+            staging_root=staging, nas_root=staging,
+            db_path=staging + "/a.db", log_path=staging + "/a.log",
+        )
+
+    def _disc(self, size_bytes: int):
+        return {0: {"fields": {"9": "1:30:00", "11": str(size_bytes)}}}
+
+    def test_refuses_a_rip_that_cannot_fit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp)
+            usage = type("U", (), {"free": 1 * 1024 ** 3, "total": 100, "used": 1})
+            with patch("autorippr.rip.shutil.disk_usage", return_value=usage):
+                with self.assertRaises(rip.RipError) as ctx:
+                    rip._ensure_space_for_rip(None, cfg, "j", self._disc(8 * 1024 ** 3), None)
+            message = str(ctx.exception)
+            self.assertIn("Not enough space", message)
+            self.assertIn("GB is free", message)
+
+    def test_allows_a_rip_with_room_to_spare(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp)
+            usage = type("U", (), {"free": 200 * 1024 ** 3, "total": 500, "used": 1})
+            with patch("autorippr.rip.shutil.disk_usage", return_value=usage):
+                rip._ensure_space_for_rip(None, cfg, "j", self._disc(8 * 1024 ** 3), None)
+
+    def test_only_counts_the_titles_being_ripped(self) -> None:
+        """Selecting one feature must not be blocked by the extras' size."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp)
+            disc = {
+                0: {"fields": {"9": "1:30:00", "11": str(4 * 1024 ** 3)}},
+                1: {"fields": {"9": "0:05:00", "11": str(40 * 1024 ** 3)}},
+            }
+            usage = type("U", (), {"free": 15 * 1024 ** 3, "total": 100, "used": 1})
+            with patch("autorippr.rip.shutil.disk_usage", return_value=usage):
+                rip._ensure_space_for_rip(None, cfg, "j", disc, [0])
+                with self.assertRaises(rip.RipError):
+                    rip._ensure_space_for_rip(None, cfg, "j", disc, None)
+
+    def test_unknown_free_space_does_not_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp)
+            with patch("autorippr.rip.shutil.disk_usage", side_effect=OSError("no")):
+                rip._ensure_space_for_rip(None, cfg, "j", self._disc(999 * 1024 ** 3), None)
+
+    def test_missing_disc_info_does_not_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            rip._ensure_space_for_rip(None, self._cfg(tmp), "j", {}, None)
 
 
 if __name__ == "__main__":

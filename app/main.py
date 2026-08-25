@@ -38,6 +38,8 @@ from autorippr.progress import get_progress
 from autorippr.job_ops import (
     JobDeleteError,
     local_artifact_bytes,
+    reclaim_completed_jobs,
+    summarize_reclaimable,
     cancel_job,
     clear_job_local_artifacts,
     clear_job_output_artifacts,
@@ -501,6 +503,8 @@ def build_parser() -> argparse.ArgumentParser:
     job_delete.add_argument("job_id")
     job_cancel = job_sub.add_parser("cancel", help="Cancel an in-progress job")
     job_cancel.add_argument("job_id")
+    job_sub.add_parser("reclaimable", help="Report staged space that completed jobs are holding")
+    job_sub.add_parser("reclaim-all", help="Free staged files for every completed job")
     job_clear_local = job_sub.add_parser("clear-local", help="Clear local artifacts while keeping the job")
     job_clear_local.add_argument("job_id")
     job_rebuild_output = job_sub.add_parser("rebuild-output", help="Rebuild local/NAS outputs from current selections")
@@ -842,6 +846,15 @@ def main() -> int:
             except JobDeleteError as exc:
                 print(f"Job cancel error: {exc}", file=sys.stderr)
                 return 12
+            print(json.dumps(result, indent=2))
+            return 0
+
+        if args.job_command == "reclaimable":
+            print(json.dumps(summarize_reclaimable(conn, cfg.staging_root), indent=2))
+            return 0
+
+        if args.job_command == "reclaim-all":
+            result = reclaim_completed_jobs(conn, cfg.staging_root)
             print(json.dumps(result, indent=2))
             return 0
 

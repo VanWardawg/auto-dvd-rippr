@@ -7,8 +7,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::Emitter;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -109,30 +107,6 @@ struct RuntimePaths {
 
 fn main() {
     tauri::Builder::default()
-        .setup(|app| {
-            let settings = MenuItem::with_id(app, "open_settings", "Settings", true, None::<&str>)?;
-            let reload = MenuItem::with_id(app, "reload_config", "Reload Config", true, None::<&str>)?;
-            let separator = PredefinedMenuItem::separator(app)?;
-            let quit = MenuItem::with_id(app, "quit_app", "Quit", true, None::<&str>)?;
-            let file_menu = Submenu::with_items(app, "File", true, &[&settings, &reload, &separator, &quit])?;
-            let menubar = Menu::with_items(app, &[&file_menu])?;
-            app.set_menu(menubar)?;
-            Ok(())
-        })
-        .on_menu_event(|app, event| {
-            match event.id().as_ref() {
-                "open_settings" => {
-                    let _ = app.emit("app-menu", "settings");
-                }
-                "reload_config" => {
-                    let _ = app.emit("app-menu", "reload-config");
-                }
-                "quit_app" => {
-                    app.exit(0);
-                }
-                _ => {}
-            }
-        })
         .invoke_handler(tauri::generate_handler![
             list_jobs,
             get_runtime_config_state,
@@ -161,6 +135,8 @@ fn main() {
             rebuild_output,
             remap_remote_output,
             delete_job,
+            reclaimable_space,
+            reclaim_completed,
             open_path
         ])
         .run(tauri::generate_context!())
@@ -474,6 +450,16 @@ fn remap_remote_output(job_id: String) -> Result<(), String> {
 fn delete_job(job_id: String) -> Result<(), String> {
     let _ = run_python_text(&["job", "delete", &job_id])?;
     Ok(())
+}
+
+#[tauri::command]
+fn reclaimable_space() -> Result<Value, String> {
+    run_python_json(&["job", "reclaimable"])
+}
+
+#[tauri::command]
+fn reclaim_completed() -> Result<Value, String> {
+    run_python_json(&["job", "reclaim-all"])
 }
 
 #[tauri::command]

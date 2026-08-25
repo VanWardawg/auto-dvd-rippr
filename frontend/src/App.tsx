@@ -1,8 +1,9 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import {
   detectDisc,
   analyzeMenu,
+  getReclaimableSpace,
+  reclaimCompletedJobs,
   autodetectRuntimeConfig,
   browseDirectoryPath,
   browseFilePath,
@@ -384,6 +385,7 @@ export default function App() {
   const [guidedReviewRows, setGuidedReviewRows] = useState<GuidedReviewRowDraft[]>([]);
   const [guidedSplitDrafts, setGuidedSplitDrafts] = useState<GuidedSplitDraft[]>([]);
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
+  const [reclaimable, setReclaimable] = useState<{ total_bytes: number; job_count: number } | null>(null);
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     const stored = window.localStorage.getItem("autorippr-theme");
     if (stored === "light" || stored === "dark") return stored;
@@ -438,6 +440,31 @@ export default function App() {
     } finally {
       setConfigLoading(false);
     }
+  }
+
+  async function refreshReclaimable() {
+    try {
+      const summary = await getReclaimableSpace();
+      setReclaimable({ total_bytes: summary.total_bytes, job_count: summary.job_count });
+    } catch {
+      // Space reporting is advisory; never surface it as a job error.
+    }
+  }
+
+  async function reclaimAll() {
+    const amount = formatBytes(reclaimable?.total_bytes) ?? "space";
+    const count = reclaimable?.job_count ?? 0;
+    const confirmed = window.confirm(
+      `Free ${amount} by deleting the staged files of ${count} completed job(s)?
+
+` +
+        "Their NAS copies and job records are kept. Re-ripping the disc would be needed to get the local files back.",
+    );
+    if (!confirmed) return;
+    await runAction("Reclaiming space", async () => {
+      await reclaimCompletedJobs();
+      await refreshReclaimable();
+    });
   }
 
   async function saveConfigFromDraft() {
@@ -509,27 +536,16 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    let disposed = false;
-    const unsubscribePromise = listen<string>("app-menu", async (event) => {
-      if (disposed) return;
-      if (event.payload === "settings") {
-        setActiveTab("settings");
-      } else if (event.payload === "reload-config") {
-        await loadConfigState();
-      }
-    });
-    return () => {
-      disposed = true;
-      void unsubscribePromise.then((unsubscribe) => unsubscribe());
-    };
-  }, []);
-
-  useEffect(() => {
     if (!configReady) return;
     void refreshJobs();
     void refreshAllDriveCards();
+    void refreshReclaimable();
     const timer = window.setInterval(() => void refreshJobs(), POLL_MS);
-    return () => window.clearInterval(timer);
+    const spaceTimer = window.setInterval(() => void refreshReclaimable(), 30000);
+    return () => {
+      window.clearInterval(timer);
+      window.clearInterval(spaceTimer);
+    };
   }, [configReady]);
 
   useEffect(() => {
@@ -874,6 +890,15 @@ export default function App() {
   const currentStageIndex = snapshot ? getPipelineStageIndex(snapshot.job.status, pipelineStages, snapshot.job.current_stage) : 0;
   const progressEta = formatEta(progressState?.eta_seconds);
   const showSettingsTab = activeTab === "settings" || !configReady;
+
+  useEffect(() => {
+    if (!showSettingsTab || !configReady) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setActiveTab("overview");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showSettingsTab, configReady]);
   const makemkvBlocking = makemkvStatus?.level === "error";
   const showMakemkvBanner = Boolean(configReady && makemkvStatus && makemkvStatus.level !== "ok" && makemkvStatus.message);
   const makemkvExpiryLabel = formatCalendarDate(makemkvStatus?.betaKeyExpiresAt);
@@ -1300,10 +1325,11 @@ export default function App() {
               {theme === "dark" ? "\u2600" : "\u263D"}
             </button>
             <button
-              className={`icon-button ${activeTab === "settings" ? "active" : ""}`}
-              title="Settings"
+              className={`icon-button ${showSettingsTab ? "is-active" : ""}`}
+              title={showSettingsTab ? "Back to jobs" : "Settings"}
               aria-label="Settings"
-              onClick={() => setActiveTab("settings")}
+              disabled={!configReady && showSettingsTab}
+              onClick={() => setActiveTab(showSettingsTab ? "overview" : "settings")}
             >
               {"\u2699"}
             </button>
@@ -1608,12 +1634,22 @@ export default function App() {
                 style={{ width: `${Math.round((stagingUsedFraction ?? 0) * 100)}%` }}
               />
             </div>
+            {reclaimable && reclaimable.total_bytes > 0 ? (
+              <button
+                className="storage-reclaim"
+                disabled={busyAction !== null}
+                onClick={() => void reclaimAll()}
+              >
+                Reclaim {formatBytes(reclaimable.total_bytes)} from {reclaimable.job_count} finished job
+                {reclaimable.job_count === 1 ? "" : "s"}
+              </button>
+            ) : null}
           </div>
         ) : null}
       </aside>
 
       <main className="content">
-        {snapshot ? (
+        {!showSettingsTab && snapshot ? (
           <section className="panel progress-panel hero-panel">
             <div className="hero-top">
               <div className="toolbar-title hero-title-block">
@@ -1758,7 +1794,7 @@ export default function App() {
         ) : null}
 
         {error ? <div className="error-banner">{error}</div> : null}
-        {showMakemkvBanner ? (
+        {!showSettingsTab && showMakemkvBanner ? (
           <div className={`review-banner ${makemkvStatus?.level === "error" ? "review-banner-danger" : ""}`}>
             <div>
               <strong>{makemkvStatus?.level === "error" ? "MakeMKV needs attention" : "MakeMKV beta key warning"}</strong>
@@ -1781,7 +1817,7 @@ export default function App() {
             </div>
           </div>
         ) : null}
-        {reviewState?.rip?.needed ? (
+        {!showSettingsTab && reviewState?.rip?.needed ? (
           <div className="review-banner review-banner-danger">
             <div>
               <strong>Rip issue detected</strong>
@@ -1797,7 +1833,7 @@ export default function App() {
             </div>
           </div>
         ) : null}
-        {reviewState?.tmdb.needed ? (
+        {!showSettingsTab && reviewState?.tmdb.needed ? (
           <div className="review-banner">
             <div>
               <strong>TMDB review needed</strong>
@@ -1816,7 +1852,7 @@ export default function App() {
             </div>
           </div>
         ) : null}
-        {reviewState?.mapping.needed ? (
+        {!showSettingsTab && reviewState?.mapping.needed ? (
           <div className="review-banner">
             <div>
               <strong>Override review recommended</strong>
@@ -1861,17 +1897,31 @@ export default function App() {
 
         {showSettingsTab ? (
           <section className="panel settings-panel">
-            <div className="section-header">
-              <div>
-                <h3>{configReady ? "Settings" : "First-run setup"}</h3>
-                <p>{configState?.configPath ?? "Loading config path..."}</p>
+            <div className="settings-header">
+              <div className="settings-header-title">
+                {configReady ? (
+                  <button
+                    className="icon-button"
+                    aria-label="Back to jobs"
+                    title="Back to jobs (Esc)"
+                    onClick={() => setActiveTab("overview")}
+                  >
+                    {"←"}
+                  </button>
+                ) : null}
+                <div>
+                  <h3>{configReady ? "Settings" : "First-run setup"}</h3>
+                  <p>{configState?.configPath ?? "Loading config path..."}</p>
+                </div>
               </div>
               <div className="toolbar-actions">
                 <span className={`status-pill status-${configReady ? "done" : "error"}`}>
                   {configReady ? "ready" : "setup required"}
                 </span>
                 {configReady ? (
-                  <button onClick={() => setActiveTab("overview")}>Close</button>
+                  <button className="primary-button" onClick={() => setActiveTab("overview")}>
+                    Done
+                  </button>
                 ) : null}
               </div>
             </div>

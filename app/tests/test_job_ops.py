@@ -27,6 +27,8 @@ from autorippr.job_ops import (  # noqa: E402
     delete_job,
     local_artifact_bytes,
     purge_local_files,
+    reclaim_completed_jobs,
+    summarize_reclaimable,
 )
 from autorippr.progress import upsert_progress  # noqa: E402
 from autorippr.state import append_job_log, create_job  # noqa: E402
@@ -264,6 +266,70 @@ class LocalStorageTests(unittest.TestCase):
                 again = purge_local_files(str(root), job_id)
                 self.assertEqual(again["freed_bytes"], 0)
                 self.assertEqual(again["removed_paths"], [])
+            finally:
+                conn.close()
+
+
+class BulkReclaimTests(unittest.TestCase):
+    """
+    Clearing 170 jobs one at a time is the same problem at the scale where the
+    disk actually fills up -- but only finished work is safe to clear.
+    """
+
+    def _job(self, root: Path, conn, status: str, size: int):
+        job_id = create_job(conn, disc_label=f"D-{status}", media_type="movie")
+        conn.execute("UPDATE jobs SET status = ? WHERE id = ?", (status, job_id))
+        conn.commit()
+        rip = root / "jobs" / job_id / "rip_output"
+        rip.mkdir(parents=True)
+        (rip / "t00.mkv").write_bytes(b"x" * size)
+        return job_id
+
+    def test_only_completed_jobs_are_counted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = open_db(str(root / "a.db"))
+            try:
+                self._job(root, conn, "done", 1_000_000)
+                self._job(root, conn, "done", 2_000_000)
+                self._job(root, conn, "ripping", 4_000_000)
+                self._job(root, conn, "error", 8_000_000)
+
+                summary = summarize_reclaimable(conn, str(root))
+
+                self.assertEqual(summary["job_count"], 2)
+                self.assertEqual(summary["total_bytes"], 3_000_000)
+            finally:
+                conn.close()
+
+    def test_reclaim_frees_completed_and_spares_the_rest(self) -> None:
+        """An errored job may be one Resume away; clearing it forces a re-rip."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = open_db(str(root / "a.db"))
+            try:
+                done_id = self._job(root, conn, "done", 3_000_000)
+                ripping_id = self._job(root, conn, "ripping", 4_000_000)
+                error_id = self._job(root, conn, "error", 5_000_000)
+
+                result = reclaim_completed_jobs(conn, str(root))
+
+                self.assertEqual(result["freed_bytes"], 3_000_000)
+                self.assertEqual(result["job_count"], 1)
+                self.assertEqual(local_artifact_bytes(str(root), done_id), 0)
+                self.assertEqual(local_artifact_bytes(str(root), ripping_id), 4_000_000)
+                self.assertEqual(local_artifact_bytes(str(root), error_id), 5_000_000)
+            finally:
+                conn.close()
+
+    def test_reclaim_with_nothing_to_free_is_a_no_op(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = open_db(str(root / "a.db"))
+            try:
+                result = reclaim_completed_jobs(conn, str(root))
+                self.assertEqual(result["freed_bytes"], 0)
+                self.assertEqual(result["job_count"], 0)
             finally:
                 conn.close()
 

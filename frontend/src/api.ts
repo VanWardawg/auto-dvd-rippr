@@ -126,3 +126,17 @@ export async function remapRemoteOutput(jobId: string): Promise<void> {
 export async function openPath(path: string): Promise<void> {
   return invoke("open_path", { path });
 }
+
+export interface ReclaimableSummary {
+  total_bytes: number;
+  job_count: number;
+  jobs: Array<{ job_id: string; disc_label: string; bytes: number }>;
+}
+
+export async function getReclaimableSpace(): Promise<ReclaimableSummary> {
+  return invoke<ReclaimableSummary>("reclaimable_space");
+}
+
+export async function reclaimCompletedJobs(): Promise<{ freed_bytes: number; job_count: number }> {
+  return invoke<{ freed_bytes: number; job_count: number }>("reclaim_completed");
+}

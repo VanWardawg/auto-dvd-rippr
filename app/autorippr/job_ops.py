@@ -137,6 +137,51 @@ def purge_local_files(staging_root: str, job_id: str) -> dict[str, Any]:
     return {"job_id": job_id, "removed_paths": removed, "freed_bytes": freed}
 
 
+def summarize_reclaimable(conn, staging_root: str) -> dict[str, Any]:
+    """
+    What could be freed right now, without ripping anything again.
+
+    Only finished jobs count. A job still in flight needs its staged files, and
+    an errored one may be one Resume away from finishing -- clearing those
+    would turn a retry into a re-rip.
+    """
+    rows = conn.execute(
+        "SELECT id, disc_label FROM jobs WHERE status = 'done' ORDER BY updated_at ASC"
+    ).fetchall()
+    jobs: list[dict[str, Any]] = []
+    total = 0
+    for row in rows:
+        job_id = str(row["id"])
+        try:
+            size = local_artifact_bytes(staging_root, job_id)
+        except OSError:
+            continue
+        if size <= 0:
+            continue
+        total += size
+        jobs.append({"job_id": job_id, "disc_label": str(row["disc_label"] or ""), "bytes": size})
+    return {"total_bytes": total, "job_count": len(jobs), "jobs": jobs}
+
+
+def reclaim_completed_jobs(conn, staging_root: str) -> dict[str, Any]:
+    """
+    Free the staged files of every completed job in one go.
+
+    Clearing 170 jobs one at a time is the same problem at a different scale,
+    and it is the scale at which the disk actually fills up. Files only: the
+    NAS path and checksum of each output stay on record.
+    """
+    summary = summarize_reclaimable(conn, staging_root)
+    freed = 0
+    cleared: list[str] = []
+    for entry in summary["jobs"]:
+        result = purge_local_files(staging_root, entry["job_id"])
+        freed += int(result.get("freed_bytes") or 0)
+        if result.get("removed_paths"):
+            cleared.append(entry["job_id"])
+    return {"freed_bytes": freed, "job_count": len(cleared), "job_ids": cleared}
+
+
 def delete_job(conn, staging_root: str, job_id: str) -> dict[str, Any]:
     exists = conn.execute("SELECT id FROM jobs WHERE id = ?", (job_id,)).fetchone()
     if not exists:
