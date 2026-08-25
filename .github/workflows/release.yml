@@ -9,6 +9,11 @@ on:
 permissions:
   contents: write
 
+# Two tags pushed close together would otherwise race to publish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   windows-release:
     runs-on: windows-latest
@@ -27,6 +32,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      # A cold Rust build is most of this job's runtime; the cache keys on
+      # Cargo.lock so it only rebuilds when dependencies actually change.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: frontend/src-tauri
 
       - name: Install build dependencies
         run: python -m pip install -r requirements-dev.txt
@@ -53,6 +65,8 @@ jobs:
             Write-Host "Ref '$ref' is not a release tag; keeping the committed version."
           }
 
+      # beforeBuildCommand runs build:self-contained, so this also rebuilds the
+      # Python backend -- a release can never package a stale one.
       - name: Build Tauri release bundle
         working-directory: frontend
         run: npm run tauri -- build
@@ -68,10 +82,46 @@ jobs:
             $relative = $_.FullName.Substring((Resolve-Path $bundleRoot).Path.Length + 1).Replace("\", "/")
             "$($hash.Hash)  $relative" | Out-File -FilePath $checksumFile -Append -Encoding utf8
           }
+          Get-Content $checksumFile
 
-      - name: Publish GitHub release assets
+      # A manual workflow_dispatch run is for checking the build, not for
+      # publishing -- without this guard it would cut a release named after
+      # whatever branch it ran on.
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          # Published as a draft so the notes can be checked before it is
+          # visible. Remove this line once you are happy going straight out.
+          draft: true
           generate_release_notes: true
+          body: |
+            ## Install
+
+            Download `Auto-Ripper_*_x64-setup.exe` (recommended) or the `.msi` below and run it.
+
+            **Windows will warn you.** These installers are not code-signed, so
+            SmartScreen shows "Windows protected your PC" — click **More info →
+            Run anyway**. Verify your download against `SHA256SUMS.txt` if you
+            want to be sure of it.
+
+            ## Before you can rip
+
+            Auto-Ripper drives external tools rather than bundling them. You need:
+
+            - [MakeMKV](https://www.makemkv.com/) — reads and decrypts discs
+            - [ffmpeg / ffprobe](https://ffmpeg.org/download.html) — probing and splitting
+            - A free [TMDB API key](https://www.themoviedb.org/settings/api) — identifies discs
+
+            The app detects the tool paths on first run and tells you what is missing.
+
+            ---
           files: |
             frontend/src-tauri/target/release/bundle/**/*
+
+      - name: Upload build artifacts
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: autorippr-installers
+          path: frontend/src-tauri/target/release/bundle/**/*

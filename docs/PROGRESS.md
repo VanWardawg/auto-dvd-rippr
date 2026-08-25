@@ -66,6 +66,20 @@ target the waiting, not the compute.
   which is not installed; `npm run tauri -- dev` fails. Use `npx tauri dev`
   until it falls back to the local CLI in devDependencies.
 
+## Before the first public release
+
+- [ ] **Make the repository public.** It is private today, so nobody can
+      download a release from it. This is the single blocking item.
+- [ ] **Tag `v0.1.0`** and let the Release workflow build it. The workflow
+      stamps the version from the tag, gates on tests and the command-wiring
+      check, rebuilds the backend, generates SHA256SUMS, and publishes a
+      **draft** release so the notes can be checked first.
+- [ ] **Rip one disc end to end on the packaged build.** The installers now
+      carry the right backend, but no disc has yet gone through the PyInstaller
+      path, which is where a missing hidden import would surface.
+- [ ] Optional: code signing. Deferred; the release notes tell users about the
+      SmartScreen prompt and point at the checksums.
+
 ## Not started
 
 - **Sidecar architecture.** Replace process-per-action with one long-lived
