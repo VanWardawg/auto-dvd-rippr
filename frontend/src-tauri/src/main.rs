@@ -40,6 +40,7 @@ struct JobSummary {
     current_stage: Option<String>,
     updated_at: String,
     error_message: Option<String>,
+    awaiting_review: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

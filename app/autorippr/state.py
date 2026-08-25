@@ -157,10 +157,13 @@ def transition_job(conn, job_id: str, to_status: str, error_message: str | None 
         )
 
     ts = now_iso()
+    # Any transition means the job moved on, so it is no longer waiting on a
+    # person -- clearing it here means no caller can forget to.
     conn.execute(
         """
         UPDATE jobs
-        SET status = ?, current_stage = ?, updated_at = ?, error_message = ?
+        SET status = ?, current_stage = ?, updated_at = ?, error_message = ?,
+            awaiting_review = 0
         WHERE id = ?
         """,
         (to_status, to_status, ts, error_message, job_id),
@@ -196,6 +199,15 @@ def append_job_log(
         """,
         (job_id, now_iso(), level, message, from_status, to_status),
     )
+
+
+def set_awaiting_review(conn, job_id: str, waiting: bool) -> None:
+    """Record whether a job is stopped and waiting on a person."""
+    conn.execute(
+        "UPDATE jobs SET awaiting_review = ?, updated_at = ? WHERE id = ?",
+        (1 if waiting else 0, now_iso(), job_id),
+    )
+    conn.commit()
 
 
 def get_job(conn, job_id: str) -> dict | None:

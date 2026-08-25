@@ -1491,3 +1491,28 @@ input::placeholder {
   background: var(--accent-soft);
   border-color: var(--accent);
 }
+
+/* Jobs waiting on a person are the one thing worth interrupting for. */
+.status-review {
+  background: var(--warn-soft);
+  color: var(--warn);
+  border-color: var(--warn-border);
+}
+
+.review-summary {
+  width: 100%;
+  margin-top: 0.6rem;
+  padding: 0.5rem 0.6rem;
+  text-align: left;
+  font-size: 0.82rem;
+  font-weight: 600;
+  background: var(--warn-soft);
+  border-color: var(--warn-border);
+  color: var(--warn);
+  box-shadow: none;
+}
+
+.review-summary:hover:not(:disabled) {
+  background: var(--warn-soft);
+  border-color: var(--warn);
+}

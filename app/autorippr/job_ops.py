@@ -221,42 +221,29 @@ def delete_job(conn, staging_root: str, job_id: str) -> dict[str, Any]:
 
 
 def clear_job_local_artifacts(conn, staging_root: str, job_id: str) -> dict[str, Any]:
+    """
+    Free a job's staged files, keeping its record of what it produced.
+
+    This used to delete the outputs, rip_titles, episode_mappings and
+    split_plans rows as well, which left a finished job reporting "0 titles
+    ripped, 0 on NAS" even though its file was sitting on the NAS. The bytes
+    are reproducible from the disc; the record of where each output landed and
+    its checksum is not, and it costs nothing to keep.
+    """
     exists = conn.execute("SELECT id FROM jobs WHERE id = ?", (job_id,)).fetchone()
     if not exists:
         raise JobDeleteError(f"Job not found: {job_id}")
 
     removed, freed_bytes = _remove_local_artifact_dirs(staging_root, job_id)
 
+    # The local paths no longer exist, so stop claiming they do.
     db_cleanup_warning = None
     try:
-        out_rows = []
-        if _table_has_column(conn, "outputs", "job_id"):
-            out_rows = conn.execute("SELECT id FROM outputs WHERE job_id = ?", (job_id,)).fetchall()
-        output_ids = [int(r["id"]) for r in out_rows]
-        if _table_has_column(conn, "transfer_attempts", "output_id"):
-            for out_id in output_ids:
-                conn.execute("DELETE FROM transfer_attempts WHERE output_id = ?", (out_id,))
-
-        if _table_has_column(conn, "job_selected_movies", "rip_title_id") and _table_has_column(conn, "job_selected_movies", "job_id"):
+        if _table_has_column(conn, "outputs", "local_path"):
             conn.execute(
-                """
-                UPDATE job_selected_movies
-                SET rip_title_id = NULL
-                WHERE job_id = ?
-                """,
+                "UPDATE outputs SET local_path = '' WHERE job_id = ? AND nas_path IS NOT NULL",
                 (job_id,),
             )
-
-        if _table_has_column(conn, "outputs", "job_id"):
-            conn.execute("DELETE FROM outputs WHERE job_id = ?", (job_id,))
-        if _table_has_column(conn, "split_plans", "job_id"):
-            conn.execute("DELETE FROM split_plans WHERE job_id = ?", (job_id,))
-        if _table_has_column(conn, "episode_mappings", "job_id"):
-            conn.execute("DELETE FROM episode_mappings WHERE job_id = ?", (job_id,))
-        if _table_has_column(conn, "rip_titles", "job_id"):
-            conn.execute("DELETE FROM rip_titles WHERE job_id = ?", (job_id,))
-        if _table_has_column(conn, "finalized_manifests", "job_id"):
-            conn.execute("DELETE FROM finalized_manifests WHERE job_id = ?", (job_id,))
         conn.commit()
     except Exception as exc:
         try:

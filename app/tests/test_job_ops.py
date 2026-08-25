@@ -256,6 +256,43 @@ class LocalStorageTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_manual_clear_keeps_the_record_of_what_was_produced(self) -> None:
+        """A cleared job must still show what it ripped and where it went."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = open_db(str(root / "a.db"))
+            try:
+                job_id, _ = self._job_with_files(root, conn)
+                conn.execute(
+                    "INSERT INTO rip_titles (job_id, title_id, duration_seconds, source_file) VALUES (?,?,?,?)",
+                    (job_id, 0, 5040.0, "t00.mkv"),
+                )
+                conn.execute(
+                    "INSERT INTO outputs (job_id, local_path, nas_path, checksum_sha256, transfer_status) "
+                    "VALUES (?,?,?,?,?)",
+                    (job_id, str(root / "local.mkv"), r"Y:\Movies\m.mkv", "abc", "done"),
+                )
+                conn.commit()
+
+                clear_job_local_artifacts(conn, str(root), job_id)
+
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT COUNT(*) AS c FROM rip_titles WHERE job_id = ?", (job_id,)
+                    ).fetchone()["c"],
+                    1,
+                )
+                row = conn.execute(
+                    "SELECT nas_path, checksum_sha256, local_path FROM outputs WHERE job_id = ?",
+                    (job_id,),
+                ).fetchone()
+                self.assertEqual(row["nas_path"], r"Y:\Movies\m.mkv")
+                self.assertEqual(row["checksum_sha256"], "abc")
+                # The local file is gone, so the path must not still claim it.
+                self.assertEqual(row["local_path"], "")
+            finally:
+                conn.close()
+
     def test_purging_twice_is_harmless(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

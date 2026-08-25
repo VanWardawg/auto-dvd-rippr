@@ -9,7 +9,7 @@ from .job_ops import purge_local_files
 from .naming import NamingError, finalize_job_outputs
 from .rip import RipError, eject_drive, execute_rip_job, recover_completed_rip
 from .splitter import SplitError, execute_splits, plan_splits_for_job
-from .state import InvalidTransitionError, append_job_log, get_job, transition_job
+from .state import InvalidTransitionError, append_job_log, get_job, set_awaiting_review, transition_job
 from .tmdb import TmdbError, identify_job_with_tmdb
 from .transfer import TransferError, ensure_nas_available, transfer_job_outputs
 
@@ -301,6 +301,7 @@ def run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = Fal
                     # Free the drive so the next disc can go in.
                     if has_rip_titles:
                         release_disc(conn, cfg, job_id, reason="waiting for review")
+                    set_awaiting_review(conn, job_id, True)
                     return {"status": "identifying", "needs_review": True, "identify": ident}
                 status = _advance_after_identify(
                     conn,
@@ -333,6 +334,7 @@ def run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = Fal
                 else:
                     mapped = map_job_episodes(conn, cfg, job_id)
                     if mapped["needs_review"]:
+                        set_awaiting_review(conn, job_id, True)
                         return {"status": "mapping", "needs_review": True, "mapping": mapped}
                     if any(m.get("needs_split") for m in mapped["mappings"]):
                         transition_job(conn, job_id, "splitting")
@@ -349,6 +351,7 @@ def run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = Fal
                 (job_id,),
             ).fetchone()["c"]
             if split_errors:
+                set_awaiting_review(conn, job_id, True)
                 return {"status": "splitting", "needs_review": True, "split_errors": int(split_errors)}
             transition_job(conn, job_id, "renaming")
             status = "renaming"

@@ -808,6 +808,18 @@ export default function App() {
     return Math.min(1, Math.max(0, (total - free) / total));
   }, [snapshot]);
 
+  const jobsAwaitingReview = useMemo(
+    () => jobs.filter((job) => Boolean(job.awaiting_review)),
+    [jobs],
+  );
+
+  // The taskbar is the only part of the app visible when it is not focused,
+  // so the count of jobs waiting on a person belongs in the window title.
+  useEffect(() => {
+    const pending = jobsAwaitingReview.length;
+    document.title = pending ? `(${pending}) Auto-Ripper — needs you` : "Auto-Ripper";
+  }, [jobsAwaitingReview]);
+
   const featureRuntimeLabel = useMemo(() => {
     const durations = (snapshot?.rip_titles ?? [])
       .map((title) => title.duration_seconds ?? 0)
@@ -1595,6 +1607,14 @@ export default function App() {
               {"\u21BB"}
             </button>
           </div>
+          {jobsAwaitingReview.length > 0 ? (
+            <button
+              className="review-summary"
+              onClick={() => setSelectedJobId(jobsAwaitingReview[0].id)}
+            >
+              {jobsAwaitingReview.length} job{jobsAwaitingReview.length === 1 ? "" : "s"} waiting on you
+            </button>
+          ) : null}
           {!configReady ? (
             <div className="empty-state">Finish setup before jobs can run.</div>
           ) : jobs.length === 0 ? (
@@ -1609,7 +1629,9 @@ export default function App() {
               >
                 <div className="job-row-top">
                   <strong className="job-row-title">{job.disc_label || "Untitled Disc"}</strong>
-                  <span className={`status-pill status-${job.status}`}>{job.status}</span>
+                  <span className={`status-pill ${job.awaiting_review ? "status-review" : `status-${job.status}`}`}>
+                    {job.awaiting_review ? "needs you" : job.status}
+                  </span>
                 </div>
                 <div className="job-row-meta">
                   <span>

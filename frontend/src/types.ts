@@ -24,6 +24,8 @@ export interface JobSummary {
   current_stage?: string | null;
   updated_at: string;
   error_message?: string | null;
+  /** The pipeline stopped here and is waiting on a person. */
+  awaiting_review?: boolean | null;
 }
 
 export interface DiscDrive {
