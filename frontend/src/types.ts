@@ -161,6 +161,15 @@ export interface SeasonEpisodeOption {
   runtime?: number | null;
 }
 
+export interface StorageState {
+  /** Bytes this job is currently occupying in staging. */
+  job_bytes: number;
+  /** Free and total bytes on the staging volume, when they can be read. */
+  free_bytes?: number | null;
+  total_bytes?: number | null;
+  staging_root: string;
+}
+
 export interface JobSnapshot {
   job: JobSummary;
   logs: JobLog[];
@@ -178,6 +187,7 @@ export interface JobSnapshot {
   dvdnav_menu?: Record<string, unknown> | null;
   review_state?: ReviewState | null;
   progress_state?: ProgressState | null;
+  storage?: StorageState | null;
 }
 
 export interface StartJobRequest {

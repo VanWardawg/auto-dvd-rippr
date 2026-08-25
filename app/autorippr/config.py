@@ -107,6 +107,12 @@ class AppConfig:
     # doubles transfer time, so it is opt-in. The stored checksum is correct
     # either way -- it is now taken from the source stream during the copy.
     verify_transfers: bool = False
+    # Delete the staged rip once its output is confirmed on the NAS. A rip is
+    # several gigabytes and is reproducible from the disc, so on a machine with
+    # limited staging space this is the difference between working through a
+    # collection and stopping every few discs to clear room by hand. Database
+    # records are kept, so the NAS path and checksum survive the files.
+    clear_local_after_transfer: bool = False
 
 
 def load_config(config_path: str) -> AppConfig:
@@ -193,5 +199,6 @@ def load_config(config_path: str) -> AppConfig:
         disc_scan_timeout_seconds=int(merged.get("disc_scan_timeout_seconds", 300)),
         eject_after_rip=_as_bool(merged.get("eject_after_rip"), False),
         verify_transfers=_as_bool(merged.get("verify_transfers"), False),
+        clear_local_after_transfer=_as_bool(merged.get("clear_local_after_transfer"), False),
     )
 

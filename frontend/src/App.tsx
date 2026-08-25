@@ -73,6 +73,13 @@ type DriveCardState = {
   continuousStatus: string | null;
 };
 
+function formatBytes(bytes?: number | null) {
+  if (bytes === null || bytes === undefined || bytes <= 0) return null;
+  const gb = bytes / 1024 ** 3;
+  if (gb >= 1) return `${gb.toFixed(gb >= 10 ? 0 : 1)} GB`;
+  return `${Math.max(1, Math.round(bytes / 1024 ** 2))} MB`;
+}
+
 function parseTitles(value?: string) {
   if (!value) return [];
   try {
@@ -309,6 +316,7 @@ function buildConfigDraft(config?: Record<string, unknown> | null) {
     rip_title_selection: String(source.rip_title_selection ?? "auto"),
     eject_after_rip: String(source.eject_after_rip ?? false),
     verify_transfers: String(source.verify_transfers ?? false),
+    clear_local_after_transfer: String(source.clear_local_after_transfer ?? false),
   };
 }
 
@@ -319,7 +327,7 @@ function buildConfigDraft(config?: Record<string, unknown> | null) {
  * back before saving -- otherwise the JSON stores "false", which is truthy on
  * the Python side.
  */
-const BOOLEAN_CONFIG_KEYS = ["eject_after_rip", "verify_transfers"];
+const BOOLEAN_CONFIG_KEYS = ["eject_after_rip", "verify_transfers", "clear_local_after_transfer"];
 
 function coerceConfigDraft(draft: Record<string, string>): Record<string, unknown> {
   const coerced: Record<string, unknown> = { ...draft };
@@ -763,6 +771,21 @@ export default function App() {
     }
   }
 
+  const localArtifactSize = useMemo(
+    () => formatBytes(snapshot?.storage?.job_bytes),
+    [snapshot],
+  );
+
+  const stagingFree = useMemo(() => formatBytes(snapshot?.storage?.free_bytes), [snapshot]);
+
+  /** Fraction of the staging volume in use, for the capacity bar. */
+  const stagingUsedFraction = useMemo(() => {
+    const total = snapshot?.storage?.total_bytes ?? 0;
+    const free = snapshot?.storage?.free_bytes ?? 0;
+    if (!total) return null;
+    return Math.min(1, Math.max(0, (total - free) / total));
+  }, [snapshot]);
+
   const featureRuntimeLabel = useMemo(() => {
     const durations = (snapshot?.rip_titles ?? [])
       .map((title) => title.duration_seconds ?? 0)
@@ -999,7 +1022,7 @@ export default function App() {
       },
       {
         key: "clear-local",
-        label: "Clear Local Artifacts",
+        label: localArtifactSize ? `Free ${localArtifactSize}` : "Clear Local Artifacts",
         disabled,
         onClick: () => runSelectedAction("Clear local artifacts", clearLocalArtifacts),
       },
@@ -1066,6 +1089,9 @@ export default function App() {
           keys.push("resume");
           break;
         case "done":
+          if (hasLocalArtifacts) {
+            keys.push("clear-local");
+          }
           if (snapshot.job.media_type === "movie") {
             keys.push("rebuild-output", "rerun-identify");
           } else {
@@ -1564,6 +1590,26 @@ export default function App() {
             ))}
           </div>
         </section>
+
+        {snapshot?.storage?.total_bytes ? (
+          <div
+            className={`storage-strip ${
+              stagingUsedFraction !== null && stagingUsedFraction > 0.9 ? "is-critical" : ""
+            }`}
+            title={snapshot.storage.staging_root}
+          >
+            <div className="storage-strip-top">
+              <span>Staging</span>
+              <strong>{stagingFree ? `${stagingFree} free` : "unknown"}</strong>
+            </div>
+            <div className="storage-bar-track">
+              <div
+                className="storage-bar-fill"
+                style={{ width: `${Math.round((stagingUsedFraction ?? 0) * 100)}%` }}
+              />
+            </div>
+          </div>
+        ) : null}
       </aside>
 
       <main className="content">
@@ -1596,7 +1642,7 @@ export default function App() {
                   <button
                     key={action.key}
                     className={
-                      index === 0 && snapshot.job.status !== "done"
+                      index === 0
                         ? "primary-button"
                         : action.tone === "danger"
                           ? "danger-button"
@@ -1983,6 +2029,23 @@ export default function App() {
                           Ejects once identification is finished — including when a job stops to ask you
                           something — so the drive is free even while a job waits. With continuous mode on,
                           dropping the next disc into the open tray starts it without touching the app.
+                        </small>
+                      </label>
+                      <label>
+                        <span>After a verified NAS copy</span>
+                        <select
+                          value={configDraft.clear_local_after_transfer ?? "false"}
+                          onChange={(e) =>
+                            setConfigDraft((value) => ({ ...value, clear_local_after_transfer: e.target.value }))
+                          }
+                        >
+                          <option value="false">Keep the local copy</option>
+                          <option value="true">Delete the staged files</option>
+                        </select>
+                        <small>
+                          A rip leaves several GB in staging and is redundant once the NAS copy is
+                          confirmed. Deleting it automatically keeps a long session from stopping to
+                          free space by hand. Job records, including the NAS path and checksum, are kept.
                         </small>
                       </label>
                       <label>

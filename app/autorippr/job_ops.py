@@ -72,6 +72,71 @@ def _tables_referencing_jobs(conn) -> list[tuple[str, str]]:
     return ordered
 
 
+# Staging directories that hold the large intermediate files. A rip is several
+# gigabytes and everything here is reproducible from the disc, so this is the
+# space that gets reclaimed once a job's output is safely on the NAS.
+LOCAL_ARTIFACT_DIRS = (
+    "rip_output",
+    "split_output",
+    "finalized",
+    "menu_analysis",
+    "dvdnav_menu",
+    "dvd_arch_menu",
+    "ocr",
+)
+
+
+def local_artifact_bytes(staging_root: str, job_id: str) -> int:
+    """How much disk a job's staged files are currently occupying."""
+    job_dir = Path(staging_root) / "jobs" / job_id
+    total = 0
+    for name in LOCAL_ARTIFACT_DIRS:
+        total += _directory_bytes(job_dir / name)
+    return total
+
+
+def _directory_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    total = 0
+    for entry in path.rglob("*"):
+        try:
+            if entry.is_file():
+                total += entry.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _remove_local_artifact_dirs(staging_root: str, job_id: str) -> tuple[list[str], int]:
+    """Delete the staged directories, reporting what went and how much it freed."""
+    job_dir = Path(staging_root) / "jobs" / job_id
+    removed: list[str] = []
+    freed = 0
+    for name in LOCAL_ARTIFACT_DIRS:
+        path = job_dir / name
+        if not path.exists():
+            continue
+        freed += _directory_bytes(path)
+        shutil.rmtree(path, ignore_errors=True)
+        removed.append(str(path))
+    return removed, freed
+
+
+def purge_local_files(staging_root: str, job_id: str) -> dict[str, Any]:
+    """
+    Delete a job's staged files but keep its database records.
+
+    This is the automatic counterpart to clear_job_local_artifacts. The manual
+    action also drops the outputs/rip_titles rows, which is fine when a person
+    deliberately reclaims space, but doing that automatically on every job
+    would discard the record of where each file landed on the NAS and its
+    checksum -- the provenance worth keeping long after the bytes are gone.
+    """
+    removed, freed = _remove_local_artifact_dirs(staging_root, job_id)
+    return {"job_id": job_id, "removed_paths": removed, "freed_bytes": freed}
+
+
 def delete_job(conn, staging_root: str, job_id: str) -> dict[str, Any]:
     exists = conn.execute("SELECT id FROM jobs WHERE id = ?", (job_id,)).fetchone()
     if not exists:
@@ -115,21 +180,7 @@ def clear_job_local_artifacts(conn, staging_root: str, job_id: str) -> dict[str,
     if not exists:
         raise JobDeleteError(f"Job not found: {job_id}")
 
-    job_dir = Path(staging_root) / "jobs" / job_id
-    removable_dirs = [
-        job_dir / "rip_output",
-        job_dir / "split_output",
-        job_dir / "finalized",
-        job_dir / "menu_analysis",
-        job_dir / "dvdnav_menu",
-        job_dir / "dvd_arch_menu",
-        job_dir / "ocr",
-    ]
-    removed: list[str] = []
-    for path in removable_dirs:
-        if path.exists():
-            shutil.rmtree(path, ignore_errors=True)
-            removed.append(str(path))
+    removed, freed_bytes = _remove_local_artifact_dirs(staging_root, job_id)
 
     db_cleanup_warning = None
     try:
@@ -172,6 +223,7 @@ def clear_job_local_artifacts(conn, staging_root: str, job_id: str) -> dict[str,
     return {
         "job_id": job_id,
         "removed_paths": removed,
+        "freed_bytes": freed_bytes,
         "db_cleanup_warning": db_cleanup_warning,
     }
 

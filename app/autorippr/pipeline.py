@@ -5,6 +5,7 @@ from typing import Any
 
 from .config import AppConfig
 from .mapper import MappingError, analyze_dvd_menu, map_job_episodes
+from .job_ops import purge_local_files
 from .naming import NamingError, finalize_job_outputs
 from .rip import RipError, eject_drive, execute_rip_job, recover_completed_rip
 from .splitter import SplitError, execute_splits, plan_splits_for_job
@@ -31,6 +32,45 @@ def resume_incomplete_jobs(conn, cfg: AppConfig, mock_rip: bool = False) -> list
         except Exception as exc:
             results.append({"job_id": job_id, "ok": False, "error": str(exc)})
     return results
+
+
+def _reclaim_local_space(conn, cfg: AppConfig, job_id: str) -> None:
+    """
+    Drop the staged rip once the output is confirmed on the NAS.
+
+    Staging space is the binding constraint on a machine working through a
+    collection: every disc leaves several gigabytes behind, and the files are
+    redundant the moment the NAS copy is verified. Off by default, because
+    deleting the only local copy should be a deliberate choice.
+    """
+    if not cfg.clear_local_after_transfer:
+        return
+    try:
+        result = purge_local_files(cfg.staging_root, job_id)
+    except OSError as exc:
+        append_job_log(
+            conn,
+            job_id,
+            "WARNING",
+            f"Could not reclaim staged files: {exc}",
+            None,
+            None,
+        )
+        conn.commit()
+        return
+
+    freed = int(result.get("freed_bytes") or 0)
+    if not freed:
+        return
+    append_job_log(
+        conn,
+        job_id,
+        "INFO",
+        f"Reclaimed {freed / (1024 ** 3):.2f} GB of staging space; the NAS copy is verified.",
+        None,
+        None,
+    )
+    conn.commit()
 
 
 def release_disc(conn, cfg: AppConfig, job_id: str, *, reason: str) -> bool:
@@ -326,6 +366,7 @@ def run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = Fal
                 return {"status": "error", "needs_review": True, "transfer": transfer}
             transition_job(conn, job_id, "done")
             status = "done"
+            _reclaim_local_space(conn, cfg, job_id)
 
         return {"status": status}
     except (RipError, TmdbError, MappingError, SplitError, NamingError, TransferError) as exc:

@@ -1382,3 +1382,57 @@ input::placeholder {
     min-width: 100%;
   }
 }
+
+/* ------------------------------------------------------- staging capacity */
+
+/* Staging space decides whether the next disc can be ripped at all, so it
+   stays visible rather than living in a file manager. */
+.storage-strip {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface-2);
+  padding: 0.55rem 0.65rem;
+}
+
+.storage-strip-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.storage-strip-top span {
+  font-size: 0.72rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.storage-strip-top strong {
+  font-size: 0.82rem;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+.storage-bar-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  overflow: hidden;
+}
+
+.storage-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.storage-strip.is-critical .storage-bar-fill {
+  background: var(--danger);
+}
+
+.storage-strip.is-critical .storage-strip-top strong {
+  color: var(--danger);
+}

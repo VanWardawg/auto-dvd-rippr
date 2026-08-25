@@ -21,5 +21,6 @@
   "disc_scan_timeout_seconds": 300,
   "eject_after_rip": false,
   "verify_transfers": false,
+  "clear_local_after_transfer": false,
   "show_overrides": {}
 }

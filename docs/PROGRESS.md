@@ -213,5 +213,18 @@ itself as complete in four separate places.
 - Activity log is one dense row per entry rather than a card per entry.
 - Overview tiles adapt to media type -- movies were showing "Scope:
   unspecified" and "Season: -" for half the row.
-- "Clear Local Artifacts" no longer receives the primary button on a finished
-  job; a destructive action was getting top billing purely by list position.
+- "Clear Local Artifacts" was briefly demoted from the primary button on the
+  mistaken reading that a destructive action had drifted into the primary slot.
+  It is the intended next step: staging space is the binding constraint, and
+  reclaiming it is what lets the next disc start. Restored, and rebuilt around
+  the actual need -- see below.
+
+### 2026-08-24 — staging space
+
+- The clear action now names the amount it will free ("Free 5.5 GB") rather
+  than describing the mechanism.
+- The sidebar carries a permanent staging capacity strip, turning red past 90%.
+- `clear_local_after_transfer` (default off) deletes the staged rip once the
+  NAS copy is confirmed. It deletes files only and keeps the database records,
+  so the NAS path and checksum survive; the manual action still clears rows
+  too, which is what it has always done.

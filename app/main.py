@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import json
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ from autorippr.pipeline import resume_incomplete_jobs, run_pipeline_for_job
 from autorippr.progress import get_progress
 from autorippr.job_ops import (
     JobDeleteError,
+    local_artifact_bytes,
     cancel_job,
     clear_job_local_artifacts,
     clear_job_output_artifacts,
@@ -241,6 +243,33 @@ def _progress_fraction(row: dict[str, Any] | None) -> float | None:
     if current is None or not total or total <= 0:
         return None
     return min(0.99, max(0.0, current / total))
+
+
+def _build_storage_state(cfg, job_id: str) -> dict[str, Any]:
+    """
+    Staging space: what this job is holding, and what is left on the drive.
+
+    Staging is the binding constraint when working through a collection -- each
+    disc leaves several gigabytes behind -- so the amount a job is occupying
+    and the room remaining both belong on screen, not just in a file manager.
+    """
+    state: dict[str, Any] = {
+        "job_bytes": 0,
+        "free_bytes": None,
+        "total_bytes": None,
+        "staging_root": cfg.staging_root,
+    }
+    try:
+        state["job_bytes"] = local_artifact_bytes(cfg.staging_root, job_id)
+    except OSError:
+        pass
+    try:
+        usage = shutil.disk_usage(cfg.staging_root)
+        state["free_bytes"] = int(usage.free)
+        state["total_bytes"] = int(usage.total)
+    except OSError:
+        pass
+    return state
 
 
 def _sync_movie_job_status(job: dict[str, Any], selected_media: Any) -> dict[str, Any]:
@@ -784,6 +813,7 @@ def main() -> int:
                         "dvdnav_menu": dvdnav_menu,
                         "review_state": review_state,
                         "progress_state": progress_state,
+                        "storage": _build_storage_state(cfg, args.job_id),
                     },
                     indent=2,
                 )

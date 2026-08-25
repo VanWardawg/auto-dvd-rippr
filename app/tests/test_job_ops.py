@@ -23,7 +23,10 @@ from autorippr.db import open_db  # noqa: E402
 from autorippr.job_ops import (  # noqa: E402
     JobDeleteError,
     _tables_referencing_jobs,
+    clear_job_local_artifacts,
     delete_job,
+    local_artifact_bytes,
+    purge_local_files,
 )
 from autorippr.progress import upsert_progress  # noqa: E402
 from autorippr.state import append_job_log, create_job  # noqa: E402
@@ -166,6 +169,101 @@ class DeleteJobTests(unittest.TestCase):
             try:
                 with self.assertRaises(JobDeleteError):
                     delete_job(conn, str(tmp_path), "no-such-job")
+            finally:
+                conn.close()
+
+
+class LocalStorageTests(unittest.TestCase):
+    """
+    Staging space is the binding constraint when working through a collection,
+    so the amount a job holds must be reported accurately and reclaiming it
+    must not take the provenance with it.
+    """
+
+    def _job_with_files(self, root: Path, conn):
+        job_id = create_job(conn, disc_label="D", media_type="movie")
+        conn.commit()
+        job_dir = root / "jobs" / job_id
+        (job_dir / "rip_output").mkdir(parents=True)
+        (job_dir / "finalized").mkdir(parents=True)
+        (job_dir / "logs").mkdir(parents=True)
+        (job_dir / "rip_output" / "t00.mkv").write_bytes(b"x" * 4_000_000)
+        (job_dir / "finalized" / "movie.mkv").write_bytes(b"y" * 2_000_000)
+        (job_dir / "logs" / "makemkv.log").write_text("log", encoding="utf-8")
+        return job_id, job_dir
+
+    def test_reports_the_size_of_staged_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = open_db(str(root / "a.db"))
+            try:
+                job_id, _ = self._job_with_files(root, conn)
+                self.assertEqual(local_artifact_bytes(str(root), job_id), 6_000_000)
+            finally:
+                conn.close()
+
+    def test_size_is_zero_for_a_job_with_nothing_staged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = open_db(str(root / "a.db"))
+            try:
+                job_id = create_job(conn, disc_label="D")
+                conn.commit()
+                self.assertEqual(local_artifact_bytes(str(root), job_id), 0)
+            finally:
+                conn.close()
+
+    def test_purge_frees_files_but_keeps_the_nas_record(self) -> None:
+        """The bytes are reproducible from the disc; the provenance is not."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = open_db(str(root / "a.db"))
+            try:
+                job_id, job_dir = self._job_with_files(root, conn)
+                conn.execute(
+                    "INSERT INTO outputs (job_id, local_path, nas_path, checksum_sha256, transfer_status) "
+                    "VALUES (?,?,?,?,?)",
+                    (job_id, "x.mkv", r"Y:\Movies\movie.mkv", "abc", "done"),
+                )
+                conn.commit()
+
+                result = purge_local_files(str(root), job_id)
+
+                self.assertEqual(result["freed_bytes"], 6_000_000)
+                self.assertFalse((job_dir / "rip_output").exists())
+                self.assertFalse((job_dir / "finalized").exists())
+                # Logs are small and are the record of what happened.
+                self.assertTrue((job_dir / "logs" / "makemkv.log").exists())
+                row = conn.execute(
+                    "SELECT nas_path, checksum_sha256 FROM outputs WHERE job_id = ?", (job_id,)
+                ).fetchone()
+                self.assertIsNotNone(row)
+                self.assertEqual(row["checksum_sha256"], "abc")
+            finally:
+                conn.close()
+
+    def test_manual_clear_reports_what_it_freed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = open_db(str(root / "a.db"))
+            try:
+                job_id, _ = self._job_with_files(root, conn)
+                result = clear_job_local_artifacts(conn, str(root), job_id)
+                self.assertEqual(result["freed_bytes"], 6_000_000)
+                self.assertEqual(local_artifact_bytes(str(root), job_id), 0)
+            finally:
+                conn.close()
+
+    def test_purging_twice_is_harmless(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = open_db(str(root / "a.db"))
+            try:
+                job_id, _ = self._job_with_files(root, conn)
+                purge_local_files(str(root), job_id)
+                again = purge_local_files(str(root), job_id)
+                self.assertEqual(again["freed_bytes"], 0)
+                self.assertEqual(again["removed_paths"], [])
             finally:
                 conn.close()
 
