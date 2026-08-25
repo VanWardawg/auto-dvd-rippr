@@ -135,6 +135,7 @@ fn main() {
             rebuild_output,
             remap_remote_output,
             delete_job,
+            set_window_theme,
             reclaimable_space,
             reclaim_completed,
             open_path
@@ -450,6 +451,21 @@ fn remap_remote_output(job_id: String) -> Result<(), String> {
 fn delete_job(job_id: String) -> Result<(), String> {
     let _ = run_python_text(&["job", "delete", &job_id])?;
     Ok(())
+}
+
+/// Match the OS-drawn window chrome to the theme the app is using.
+///
+/// The title bar belongs to Windows, not to the webview, so a dark UI in a
+/// light title bar is the default unless the window is told otherwise.
+#[tauri::command]
+fn set_window_theme(window: tauri::Window, theme: String) -> Result<(), String> {
+    let resolved = match theme.as_str() {
+        "dark" => Some(tauri::Theme::Dark),
+        "light" => Some(tauri::Theme::Light),
+        // Anything else hands the decision back to the system setting.
+        _ => None,
+    };
+    window.set_theme(resolved).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

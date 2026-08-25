@@ -234,6 +234,9 @@ itself as complete in four separate places.
 - The File menu (Settings / Reload Config / Quit) was removed: all three had
   duplicates in the app, and the menu bar cost a strip of vertical space.
 - Settings is a full view rather than a panel stacked under the job progress,
-  with a back arrow, a Done button, and Escape to close. It deletes files only and keeps the database records,
+  with a back arrow, a Done button, and Escape to close.
+- The Windows title bar follows the app theme. It is drawn by the OS rather
+  than the webview, so a dark UI kept a light title bar until the window was
+  told separately via `set_theme`. It deletes files only and keeps the database records,
   so the NAS path and checksum survive; the manual action still clears rows
   too, which is what it has always done.

@@ -140,3 +140,8 @@ export async function getReclaimableSpace(): Promise<ReclaimableSummary> {
 export async function reclaimCompletedJobs(): Promise<{ freed_bytes: number; job_count: number }> {
   return invoke<{ freed_bytes: number; job_count: number }>("reclaim_completed");
 }
+
+/** Keep the OS-drawn title bar in step with the app's theme. */
+export async function setWindowTheme(theme: "light" | "dark"): Promise<void> {
+  return invoke("set_window_theme", { theme });
+}

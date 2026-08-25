@@ -4,6 +4,7 @@ import {
   analyzeMenu,
   getReclaimableSpace,
   reclaimCompletedJobs,
+  setWindowTheme,
   autodetectRuntimeConfig,
   browseDirectoryPath,
   browseFilePath,
@@ -529,6 +530,11 @@ export default function App() {
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     window.localStorage.setItem("autorippr-theme", theme);
+    // The title bar is drawn by the OS and does not follow the page, so it has
+    // to be told separately or a dark app keeps a light title bar.
+    void setWindowTheme(theme).catch(() => {
+      // Non-Windows, or an older webview: the chrome simply stays as it is.
+    });
   }, [theme]);
 
   useEffect(() => {
