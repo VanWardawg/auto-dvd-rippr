@@ -105,6 +105,15 @@ Build a release installer:
 npm run build:self-contained && npm run tauri -- build
 ```
 
+This produces both an `.msi` and an NSIS `-setup.exe` under
+`src-tauri/target/release/bundle/`.
+
+> Use `npm run tauri`, not `npx tauri` directly. The wrapper falls back to the
+> local Tauri CLI when none is installed globally, and moves build output out
+> of cloud-synced folders — OneDrive holds files open during bundling, which
+> fails the build with `Access is denied (os error 5)` after a successful
+> compile.
+
 Run the backend tests:
 
 ```bash

@@ -68,12 +68,6 @@ target the waiting, not the compute.
 
 ## Not started
 
-- **Content Security Policy.** `tauri.conf.json` sets `"csp": null`. A
-  restrictive policy is easy to write but needs a packaged-app run to confirm
-  it does not blank the window, so it was left alone rather than shipped
-  unverified. Low priority: the webview loads only bundled assets and makes no
-  network requests of its own (TMDB calls happen in Python).
-
 - **Sidecar architecture.** Replace process-per-action with one long-lived
   backend speaking JSON-RPC over stdio, and push progress instead of polling.
   This is the biggest structural improvement available and unblocks
@@ -191,6 +185,31 @@ is exactly when the drive would otherwise be held for 35 minutes or overnight.
 
 Together: open tray, drop the next disc in, it starts. No UI interaction.
 Test suite grew from 91 to 97 cases.
+
+### 2026-08-25 — the packaged build, verified for the first time
+
+Everything until now had only ever run in dev mode, which resolves the backend
+to `app/main.py`. Release mode uses the PyInstaller executable instead, and
+that path had never been exercised.
+
+- `tauri build` was **broken on this machine**. It compiled, then failed at
+  bundling with `failed to bundle project: Access is denied (os error 5)` on a
+  file no user process held -- the Windows Restart Manager reported nothing,
+  because the checkout is inside OneDrive and its cloud-files filter driver had
+  the file open. `run-tauri.mjs` now redirects `CARGO_TARGET_DIR` outside the
+  sync root when it detects one; CI and non-synced checkouts are unaffected.
+  Moving the checkout out of OneDrive would fix this and the git "dubious
+  ownership" error at the source.
+- With that fixed, both bundles build: `.msi` and an NSIS `-setup.exe`.
+- The packaged app was launched and verified: window opens, config loads, all
+  174 jobs list (so the bundled backend is genuinely being invoked), staging
+  capacity reports, and the optical drive is detected.
+- The bundled backend was also run directly, and migrated the live database to
+  schema 3 correctly.
+- **Content Security Policy is now enabled and verified** against that
+  packaged build, which is what it was waiting on. The app renders and IPC
+  works under `default-src 'self'`; `style-src` allows inline because React
+  writes the progress-bar widths that way.
 
 ### 2026-08-24 — UI pass
 

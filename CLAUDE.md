@@ -130,8 +130,16 @@ cd frontend && npm run build:self-contained && npm run tauri -- build
 - **`tkinter` is deliberately excluded** from the PyInstaller bundle. Do not
   import it in backend code — the legacy Tk GUI was removed because it pulled
   ~20 MB of Tcl/Tk into every release.
-- The repo lives under OneDrive, which can trigger git "dubious ownership"
-  errors and occasional file locks during builds.
+- **The repo lives under OneDrive, and its sync engine breaks release builds.**
+  `tauri build` compiles fine and then fails at the bundling step with
+  `failed to bundle project: Access is denied (os error 5)`, on a file no user
+  process holds -- the Restart Manager reports nothing, because it is the
+  cloud-files filter driver. `run-tauri.mjs` works around it by redirecting
+  `CARGO_TARGET_DIR` outside the sync root when it detects one, so build output
+  lands in `%LOCALAPPDATA%utorippr-build	arget`. Always build via
+  `npm run tauri -- build`, never `npx tauri build`, or you get the failure.
+  OneDrive is also the source of git's "dubious ownership" complaint. Moving
+  the checkout out of OneDrive would remove both problems.
 
 ## Testing
 
