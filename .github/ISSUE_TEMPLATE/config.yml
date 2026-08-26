@@ -1,0 +1,7 @@
+blank_issues_enabled: true
+contact_links:
+  - name: MakeMKV will not read a disc
+    url: https://www.makemkv.com/forum/
+    about: >
+      Auto-Ripper does not read discs itself. If MakeMKV alone cannot open the
+      disc, the MakeMKV forum is the right place.

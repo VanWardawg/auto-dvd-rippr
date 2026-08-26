@@ -66,6 +66,25 @@ target the waiting, not the compute.
   which is not installed; `npm run tauri -- dev` fails. Use `npx tauri dev`
   until it falls back to the local CLI in devDependencies.
 
+### 2026-08-26 — pre-public audit
+
+Scanned the history before making it public: no secrets, no private IPs, no
+NAS hostnames. The one string that looked exactly like a TMDB key was cargo's
+CACHEDIR.TAG signature, which is the same constant everywhere.
+
+- `mapper.py` had an absolute path with a username baked in, which was both a
+  privacy leak and a branch that could only ever match on one machine.
+- `naming.py` (390 lines) and `splitter.py` (270 lines) had **no tests at all**,
+  despite deciding what every file is called and where episodes are cut. Both
+  now covered: 41 cases, verified by injecting real regressions and confirming
+  they fail.
+- Added issue templates, SECURITY.md and CONTRIBUTING.md.
+
+Still uncovered: `mapper.py` (2,107 lines, the OCR and episode-assignment
+logic) and the frontend. `dvdnav_menu.py` swallows 10 exceptions silently,
+which makes a genuine failure indistinguishable from "optional dependency not
+installed".
+
 ## Before the first public release
 
 - [ ] **Make the repository public.** It is private today, so nobody can

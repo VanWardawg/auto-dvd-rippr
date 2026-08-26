@@ -1,0 +1,83 @@
+name: Bug report
+description: Something went wrong while ripping, identifying, or transferring
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Most Auto-Ripper problems are answered by the job's activity log and the
+        MakeMKV log, so please include them — it saves a round trip.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Auto-Ripper version
+      description: Shown in the installer filename, e.g. 0.1.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Which stage failed?
+      options:
+        - Ripping (MakeMKV)
+        - Identifying (TMDB)
+        - Mapping episodes
+        - Splitting
+        - Renaming
+        - Copying to NAS
+        - First-run setup
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: media
+    attributes:
+      label: Disc type
+      options: ["DVD", "Blu-ray", "Not sure"]
+    validations:
+      required: true
+
+  - type: textarea
+    id: activity-log
+    attributes:
+      label: Activity log
+      description: >
+        From the job's Activity tab. The lines around the failure are usually
+        enough — you do not need the whole thing.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: makemkv-log
+    attributes:
+      label: MakeMKV log (rip failures only)
+      description: >
+        staging_root\jobs\<job-id>\logs\makemkv.log — the last 30 lines. Skip
+        this if the failure was not during ripping.
+      render: text
+
+  - type: input
+    id: makemkv-version
+    attributes:
+      label: MakeMKV version
+      description: Help → About in MakeMKV. Expired beta keys cause most rip failures.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed anything private from the logs (NAS paths, API keys)
+          required: true

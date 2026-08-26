@@ -125,6 +125,8 @@ py -3.11 -m unittest discover -s app/tests -t app/tests
 
 ## Documentation
 
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to build, test, and what the conventions are
+- [`SECURITY.md`](SECURITY.md) — what the app touches, and how to report a vulnerability
 - [`CLAUDE.md`](CLAUDE.md) — architecture and conventions, for contributors and AI assistants
 - [`wiki/`](wiki/) — setup, CLI usage, debugging, testing
 - [`specs/`](specs/) — design specifications
