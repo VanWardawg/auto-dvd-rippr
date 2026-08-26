@@ -1354,6 +1354,7 @@ export default function App() {
           </div>
         </div>
 
+        <div className="sidebar-scroll">
         {!configReady ? (
           <div className="review-banner review-banner-danger">
             <div>
@@ -1644,6 +1645,7 @@ export default function App() {
             ))}
           </div>
         </section>
+        </div>
 
         {snapshot?.storage?.total_bytes ? (
           <div
