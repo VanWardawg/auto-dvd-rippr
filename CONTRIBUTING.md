@@ -25,7 +25,7 @@ py -3.11 -m unittest discover -s app/tests -t app/tests
 ```
 
 ```bash
-cd frontend && npx tsc --noEmit && npm run check:commands
+cd frontend && npm test && npx tsc --noEmit && npm run check:commands
 ```
 
 CI runs all three on every push, plus a full installer build.

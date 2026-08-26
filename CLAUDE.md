@@ -104,6 +104,12 @@ Run backend tests:
 py -3.11 -m unittest discover -s app/tests -t app/tests
 ```
 
+Run frontend tests (the pure helpers in `src/lib.ts`):
+
+```bash
+cd frontend && npm test
+```
+
 Exercise the pipeline without a disc (creates fake MKVs):
 
 ```bash
@@ -150,6 +156,12 @@ cd frontend && npm run build:self-contained && npm run tauri -- build
 
 ## Testing
 
-`app/tests/test_runtime_regressions.py` (stdlib `unittest`) covers regressions
-in job lifecycle and config handling. It runs in CI on every push. Add cases
-here when fixing a bug rather than starting a new framework.
+Backend tests are stdlib `unittest` under `app/tests/`, no framework. Frontend
+tests are vitest over `src/lib.ts`, which holds the pure presentation helpers
+extracted out of `App.tsx` — anything testable without a browser belongs there
+rather than inside the component.
+
+Both run in CI on every push. When fixing a bug, add a case that fails without
+the fix, and *check that it does*: several tests here were written after a bug
+reached a real disc, and one early attempt at a regression turned out to be
+mathematically equivalent to the original code.
