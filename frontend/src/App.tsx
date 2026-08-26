@@ -468,6 +468,20 @@ export default function App() {
     });
   }
 
+  async function confirmDeleteJob() {
+    if (!selectedJobId) return;
+    const job = jobs.find((entry) => entry.id === selectedJobId);
+    const label = job?.disc_label || "this job";
+    const size = localArtifactSize ? ` and ${localArtifactSize} of staged files` : "";
+    const confirmed = window.confirm(
+      `Delete ${label}?\n\n` +
+        `This removes the job, its history${size}, and the record of what it produced. ` +
+        "Anything already copied to the NAS is left alone. This cannot be undone.",
+    );
+    if (!confirmed) return;
+    await runSelectedAction("Delete", deleteJob);
+  }
+
   async function saveConfigFromDraft() {
     await runAction("Saving settings", async () => {
       const next = await saveRuntimeConfig({
@@ -910,6 +924,18 @@ export default function App() {
   const showSettingsTab = activeTab === "settings" || !configReady;
 
   useEffect(() => {
+    if (!modal) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setModal(null);
+        setModalJobId(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [modal]);
+
+  useEffect(() => {
     if (!showSettingsTab || !configReady) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") setActiveTab("overview");
@@ -1077,10 +1103,10 @@ export default function App() {
       },
       {
         key: "delete",
-        label: "Delete",
+        label: "Delete job",
         disabled,
         tone: "danger",
-        onClick: () => runSelectedAction("Delete", deleteJob),
+        onClick: () => void confirmDeleteJob(),
       },
     ];
     if (canRemapRemoteOutput) {
@@ -1402,6 +1428,8 @@ export default function App() {
                       <button
                         type="button"
                         className={card.continuousMode ? "primary-button" : undefined}
+                        aria-pressed={card.continuousMode}
+                        aria-label={`Continuous mode for drive ${index + 1}`}
                         disabled={busyAction !== null || !configReady || (makemkvBlocking && !card.continuousMode)}
                         onClick={() =>
                           updateDriveCard(card.id, (value) => ({
@@ -1442,7 +1470,12 @@ export default function App() {
                     </label>
                     <label>
                       <span>&nbsp;</span>
-                      <button type="button" disabled={!configReady} onClick={() => void refreshDriveCard(card.id)}>
+                      <button
+                        type="button"
+                        aria-label={`Refresh disc in drive ${index + 1}`}
+                        disabled={!configReady}
+                        onClick={() => void refreshDriveCard(card.id)}
+                      >
                         Refresh Disc
                       </button>
                     </label>
@@ -1586,6 +1619,7 @@ export default function App() {
                   </div>
                   <button
                     className="primary-button"
+                    aria-label={`Start ripping on drive ${index + 1}`}
                     disabled={busyAction !== null || !configReady || makemkvBlocking}
                     onClick={() =>
                       void runAction(`Starting pipeline (${card.form.opticalDrive ?? `Drive ${index + 1}`})`, async () => {
@@ -2452,8 +2486,15 @@ export default function App() {
                   <label>
                     <span>Search query</span>
                     <input
+                      autoFocus
                       value={modalValues.searchQuery ?? ""}
                       onChange={(e) => setModalValues((v) => ({ ...v, searchQuery: e.target.value }))}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && (modalValues.searchQuery ?? "").trim() && busyAction === null) {
+                          e.preventDefault();
+                          void runManualTmdbSearch();
+                        }
+                      }}
                     />
                   </label>
                   <button
