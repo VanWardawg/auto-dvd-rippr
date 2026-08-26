@@ -1392,9 +1392,11 @@ export default function App() {
               return (
                 <div key={card.id} className="drive-card">
                   <div className="drive-card-header">
-                    <div>
+                    <div className="drive-card-title">
                       <h3>{`Drive ${index + 1}`}</h3>
-                      <p>{card.form.opticalDrive ? `Watching ${card.form.opticalDrive}` : "Auto / first disc with media"}</p>
+                      <span className="drive-card-target">
+                        {card.form.opticalDrive ? card.form.opticalDrive : "auto"}
+                      </span>
                     </div>
                     <div className="drive-card-actions">
                       <button
@@ -1409,11 +1411,18 @@ export default function App() {
                           }))
                         }
                       >
-                        {card.continuousMode ? "Continuous On" : "Continuous Off"}
+                        {card.continuousMode ? "Continuous on" : "Continuous off"}
                       </button>
                       {driveCards.length > 1 ? (
-                        <button type="button" className="ghost-button" disabled={busyAction !== null} onClick={() => removeDriveCard(card.id)}>
-                          Remove
+                        <button
+                          type="button"
+                          className="icon-button"
+                          title="Remove this drive"
+                          aria-label={`Remove drive ${index + 1}`}
+                          disabled={busyAction !== null}
+                          onClick={() => removeDriveCard(card.id)}
+                        >
+                          {"×"}
                         </button>
                       ) : null}
                     </div>
