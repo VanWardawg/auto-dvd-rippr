@@ -1689,11 +1689,21 @@ def _candidate_dvd_arch_python_commands() -> list[list[str]]:
     python311 = shutil.which("python3.11")
     if python311:
         commands.append([python311])
-    known = Path(
-        r"C:\Users\<user>\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\python.exe"
-    )
-    if known.exists():
-        commands.append([str(known)])
+    # The Microsoft Store build of Python installs under the current
+    # user's WindowsApps folder, which shutil.which often will not
+    # surface. This used to be one absolute path with a specific username
+    # baked into it: it matched on exactly one machine and silently did
+    # nothing everywhere else.
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        store_apps = Path(local_app_data) / "Microsoft" / "WindowsApps"
+        try:
+            for entry in sorted(store_apps.glob("PythonSoftwareFoundation.Python.3.1*")):
+                candidate = entry / "python.exe"
+                if candidate.exists():
+                    commands.append([str(candidate)])
+        except OSError:
+            pass
     commands.append([sys.executable])
 
     unique: list[list[str]] = []
