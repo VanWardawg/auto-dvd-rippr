@@ -15,6 +15,7 @@ every row it wrote. A disc holding "A Surprise for Minnie" (S01E02) alongside
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 APP_ROOT = Path(__file__).resolve().parents[1]
@@ -194,6 +195,86 @@ class PreselectShowTests(unittest.TestCase):
             conn.execute("SELECT 1 FROM job_selected_media WHERE job_id = ?", (job_id,)).fetchone()
         )
 
+
+
+class CrossSeasonNamingTests(unittest.TestCase):
+    """
+    A compilation's files must land in the season each episode belongs to.
+
+    Naming read the season once, from the job, and used it for both the folder
+    and the sNNeNN token on every file. That is correct for an ordinary disc
+    and silently wrong for a compilation: "Minnie's Picnic" (S02E05) would be
+    written as s01e05 into Season 01 -- wrong name, wrong folder, and nothing
+    downstream to notice.
+    """
+
+    def _finalize(self, rows):
+        import json as _json
+        import tempfile
+        from autorippr.db import open_db
+        from autorippr.naming import _finalize_tv
+        from autorippr.state import create_job
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        conn = open_db(str(root / "a.db"))
+        self.addCleanup(conn.close)
+
+        job_id = create_job(conn, disc_label="MMCH", media_type="tv", disc_scope="compilation")
+        source_dir = root / "src"
+        source_dir.mkdir()
+        for index, (season, episode, name) in enumerate(rows):
+            mkv = source_dir / f"t{index:02d}.mkv"
+            mkv.write_text("data")
+            rip_id = conn.execute(
+                "INSERT INTO rip_titles (job_id, title_id, duration_seconds, source_file) VALUES (?,?,?,?)",
+                (job_id, index, 1500.0, str(mkv)),
+            ).lastrowid
+            conn.execute(
+                """
+                INSERT INTO episode_mappings (
+                    job_id, rip_title_id, season_number, episode_start, episode_end,
+                    tmdb_episode_ids_json, episode_titles_json, confidence, reason,
+                    manual_override, needs_split
+                ) VALUES (?,?,?,?,?,?,?,?,?,0,0)
+                """,
+                (job_id, rip_id, season, episode, episode, "[]", _json.dumps([name]), 0.9, "test"),
+            )
+        conn.commit()
+
+        out_root = root / "out"
+        cfg = SimpleNamespace(collision_policy="skip")
+        items = _finalize_tv(conn, cfg, job_id, out_root, "Mickey Mouse Clubhouse (2006)", 1)
+        written = sorted(str(Path(i["local_path"]).relative_to(out_root)) for i in items)
+        return written
+
+    def test_episodes_are_filed_under_their_own_seasons(self) -> None:
+        written = self._finalize([
+            (1, 2, "A Surprise for Minnie"),
+            (2, 5, "Minnie's Picnic"),
+        ])
+        joined = " | ".join(written)
+        self.assertIn("Season 01", joined)
+        self.assertIn("Season 02", joined)
+        self.assertIn("s01e02", joined)
+        self.assertIn("s02e05", joined)
+
+    def test_no_episode_borrows_another_season_number(self) -> None:
+        # The specific corruption: S02E05 written as s01e05.
+        written = self._finalize([(1, 2, "A Surprise for Minnie"), (2, 5, "Minnie's Picnic")])
+        self.assertNotIn("s01e05", " | ".join(written))
+
+    def test_specials_get_their_own_folder(self) -> None:
+        written = self._finalize([(0, 10, "Minnie's Bow-Tique"), (1, 2, "A Surprise for Minnie")])
+        joined = " | ".join(written)
+        self.assertIn("Season 00", joined)
+        self.assertIn("s00e10", joined)
+
+    def test_an_ordinary_single_season_disc_is_unchanged(self) -> None:
+        written = self._finalize([(2, 1, "One"), (2, 2, "Two"), (2, 3, "Three")])
+        self.assertTrue(all("Season 02" in path for path in written), written)
+        self.assertEqual(len(written), 3)
 
 if __name__ == "__main__":
     unittest.main()

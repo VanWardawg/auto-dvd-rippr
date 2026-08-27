@@ -166,13 +166,12 @@ def _finalize_multi_movie(conn, cfg: AppConfig, job_id: str, finalize_root: Path
 
 
 def _finalize_tv(conn, cfg: AppConfig, job_id: str, finalize_root: Path, title_year: str, season_number) -> list[dict[str, Any]]:
-    season_no = int(season_number or 1)
-    season_dir = finalize_root / title_year / f"Season {season_no:02d}"
-    season_dir.mkdir(parents=True, exist_ok=True)
+    default_season = int(season_number or 1)
 
     mappings = conn.execute(
         """
-        SELECT em.id, em.episode_start, em.episode_end, em.tmdb_episode_ids_json, em.episode_titles_json, em.needs_split,
+        SELECT em.id, em.season_number, em.episode_start, em.episode_end, em.tmdb_episode_ids_json,
+               em.episode_titles_json, em.needs_split,
                rt.source_file
         FROM episode_mappings em
         LEFT JOIN rip_titles rt ON rt.id = em.rip_title_id
@@ -184,6 +183,18 @@ def _finalize_tv(conn, cfg: AppConfig, job_id: str, finalize_root: Path, title_y
 
     items: list[dict[str, Any]] = []
     for m in mappings:
+        # Each mapping carries its own season. On an ordinary disc they all
+        # match the job's, but a compilation draws from across the show, and
+        # using one season for the whole job would file "Minnie's Picnic"
+        # (S02E05) as s01e05 in the Season 01 folder -- wrong name, wrong
+        # place, and nothing downstream would notice.
+        # Explicit None check, not `or`: specials are season 0, which is falsy,
+        # so `or default_season` filed every special under the job's season.
+        season_no = (
+            int(m["season_number"]) if m["season_number"] is not None else default_season
+        )
+        season_dir = finalize_root / title_year / f"Season {season_no:02d}"
+        season_dir.mkdir(parents=True, exist_ok=True)
         eps = list(range(int(m["episode_start"]), int(m["episode_end"]) + 1))
         titles_json = json.loads(m["episode_titles_json"] or "[]")
         ep_titles = [

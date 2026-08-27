@@ -358,7 +358,11 @@ def set_mapping_override(
         """,
         (row["job_id"],),
     ).fetchone()
-    season_number = int(selected_media["season_number"] or 1) if selected_media else 1
+    season_number = (
+        int(selected_media["season_number"])
+        if selected_media and selected_media["season_number"] is not None
+        else 1
+    )
     title_lookup: dict[int, str] = {}
     if selected_media:
         episodes = fetch_tmdb_tv_episodes(conn, cfg, int(selected_media["tmdb_id"]), season_number)
@@ -902,7 +906,11 @@ def _build_bundle_association_artifact(conn, cfg: AppConfig, job_id: str) -> dic
     if not selected:
         return {"job_id": job_id, "bundles": [], "play_all": None, "confidence_gate": {"ok": False, "reason": "No selected media"}}
 
-    season_number = int(selected["season_number"] or 1)
+    # Specials are season 0, which is falsy -- `or 1` would silently move a
+    # specials disc into season 1.
+    season_number = (
+        int(selected["season_number"]) if selected["season_number"] is not None else 1
+    )
     episodes = fetch_tmdb_tv_episodes(conn, cfg, int(selected["tmdb_id"]), season_number)
     targets = [
         EpisodeTarget(int(e["episode_number"]), int(e["id"]), str(e["name"]))
