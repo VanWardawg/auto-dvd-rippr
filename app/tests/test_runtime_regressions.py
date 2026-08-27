@@ -43,9 +43,17 @@ def build_test_config(staging_root: str, db_path: str, log_path: str) -> AppConf
 
 
 
-def _recent(seconds_ago: float) -> str:
-    """An ISO timestamp `seconds_ago` in the past, as a live rip would write."""
-    return (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
+def _rip_timestamps(quiet_seconds: float) -> tuple[str, str]:
+    """
+    A live rip's (updated_at, last_advance_at), exactly `quiet_seconds` apart.
+
+    Both come off one clock reading on purpose. Taking two separate readings
+    makes the real gap `quiet_seconds` minus however long elapsed between them,
+    which put a 60s gap under the 60s threshold often enough to fail the suite
+    roughly one run in fifty -- measured at up to 7ms of drift.
+    """
+    now = datetime.now(timezone.utc)
+    return now.isoformat(), (now - timedelta(seconds=quiet_seconds)).isoformat()
 
 class RuntimeRegressionTests(unittest.TestCase):
     def test_pipeline_moves_job_to_error_when_rip_raises(self) -> None:
@@ -92,12 +100,13 @@ class RuntimeRegressionTests(unittest.TestCase):
                 "updated_at": "2026-08-15T02:08:04+00:00",
             }
             # Still reporting a minute after progress last moved.
+            _stalled = _rip_timestamps(60)
             progress_row = {
                 "stage": "ripping",
                 "current_units": 1024.0,
                 "total_units": 65536.0,
-                "updated_at": _recent(0),
-                "last_advance_at": _recent(60),
+                "updated_at": _stalled[0],
+                "last_advance_at": _stalled[1],
             }
 
             review = cli_main._build_review_state(
@@ -134,12 +143,13 @@ class RuntimeRegressionTests(unittest.TestCase):
                 "movie_mode": "single",
                 "updated_at": "2026-08-15T02:08:04+00:00",
             }
+            _healthy = _rip_timestamps(1)
             progress_row = {
                 "stage": "ripping",
                 "current_units": 32768.0,
                 "total_units": 65536.0,
-                "updated_at": _recent(0),
-                "last_advance_at": _recent(1),
+                "updated_at": _healthy[0],
+                "last_advance_at": _healthy[1],
             }
 
             review = cli_main._build_review_state(

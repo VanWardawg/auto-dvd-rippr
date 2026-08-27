@@ -175,11 +175,12 @@ def progress_row(*, age_seconds: float, advanced_seconds_ago: float | None = Non
     `advanced_seconds_ago` defaults to the same instant, which is the shape a
     dead writer leaves behind: every timestamp frozen together.
     """
-    updated = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
-    if advanced_seconds_ago is None:
-        advance = updated
-    else:
-        advance = datetime.now(timezone.utc) - timedelta(seconds=advanced_seconds_ago)
+    # One clock reading for both, so the gap between them is exactly what the
+    # caller asked for. Two readings drift by a few milliseconds, which is
+    # enough to fall the wrong side of a threshold.
+    now = datetime.now(timezone.utc)
+    updated = now - timedelta(seconds=age_seconds)
+    advance = updated if advanced_seconds_ago is None else now - timedelta(seconds=advanced_seconds_ago)
     return {
         "stage": "ripping",
         "current_units": 10948.0,
