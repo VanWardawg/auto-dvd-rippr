@@ -62,9 +62,30 @@ target the waiting, not the compute.
   `clear_job_local_artifacts` and `clear_job_output_artifacts` leave the
   `job_progress` row behind, so the UI can briefly show stale rip progress.
   Cosmetic.
-- **`run-tauri.mjs` is broken.** It spawns a bare `tauri` from `~/.cargo/bin`,
-  which is not installed; `npm run tauri -- dev` fails. Use `npx tauri dev`
-  until it falls back to the local CLI in devDependencies.
+
+### 2026-08-26 — worn discs
+
+A PONYO DVD failed to rip: `MEDIUM ERROR:L-EC UNCORRECTABLE`, 36 read errors,
+17 of them at one offset in `VTS_12_1.VOB`. Ripping every title on the disc
+worked. The disc carried the feature twice -- titles 0 and 1, both 102.5
+minutes, 444 KB apart in size -- and selection collapsed them to the larger
+one, which was the copy on the scratched sectors.
+
+Size is a fine tiebreak between identical-length titles (Blu-ray playlist
+obfuscation makes the largest the complete version rather than a partial
+angle), but it says nothing about whether the disc is readable there. The
+copies sit on different physical sectors, so the loser of that tiebreak is
+now kept as a fallback and retried when the chosen title fails. Partial
+output from the failed attempt is deleted first, or the pipeline would count
+the truncated file as a ripped title.
+
+Only same-length titles qualify as fallbacks: retrying a 102-minute feature
+with a 3-minute trailer would produce something that looks like a successful
+rip and is not the movie.
+
+Drive cards also persist now. They were React state only, so every reload --
+and every HMR update while editing the frontend -- dropped back to one blank
+card, and a two-drive machine had to be re-set-up by hand each session.
 
 ### 2026-08-26 — pre-public audit
 
