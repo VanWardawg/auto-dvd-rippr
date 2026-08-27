@@ -70,6 +70,43 @@ target the waiting, not the compute.
   `job_progress` row behind, so the UI can briefly show stale rip progress.
   Cosmetic.
 
+### 2026-08-27 — the TV path had never once run
+
+Both Minnie compilation discs failed the instant they started:
+
+    InvalidTransitionError: Invalid transition queued -> identifying.
+    Allowed: ['error', 'ripping']
+
+Movies and TV leave `queued` in opposite directions -- a movie rips then
+identifies, TV identifies first so that mapping knows the episode list before
+the rip lands. pipeline.py has branched that way since the first commit, and
+_advance_after_identify has always sent an unripped TV job on to `ripping`.
+None of those edges existed in ALLOWED_TRANSITIONS. Three were missing:
+`queued -> identifying`, `identifying -> ripping`, `ripping -> mapping`.
+
+So every TV job started from `queued` died on its first step, from the initial
+commit until now. The database says it plainly: 185 jobs reached `ripping` from
+`queued` and not one ever reached `identifying`. The five TV discs that did
+complete all took the movie path -- ripping first, identifying after -- which
+is also why Wingfeather cost fourteen hand-corrected mapping rows: it mapped
+without the season context that identifying-first exists to provide.
+
+It stayed hidden because nothing tested a TV job end to end. Each missing edge
+was individually plausible; only walking the whole path shows the table and the
+pipeline disagreeing. There is now a test that walks it, and the state diagram
+in CLAUDE.md documents both paths rather than just the movie one.
+
+**Compilations always pause for confirmation.** Pre-flighting the mapping stage
+while the discs ripped turned up the next hazard: when the name match fails,
+the planner assigns whatever comes next in the candidate pool. With specials
+included that pool begins "Mickey's Great Clubhouse Hunt, Mickey's Adventures
+in Wonderland, The Wizard of Dizz (2)", so a Minnie disc could be labelled with
+unrelated specials -- and review only fires below 0.85 confidence, which a
+duration-based guess can clear. Position is evidence on an ordinary disc and
+noise on a compilation, so these are now always confirmed by hand.
+
+313 backend tests, 63 frontend.
+
 ### 2026-08-27 — the TV flow
 
 The manual flow this replaces: rename the disc label, open TMDB in a browser,
