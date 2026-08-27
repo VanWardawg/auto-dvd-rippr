@@ -70,6 +70,44 @@ target the waiting, not the compute.
   `job_progress` row behind, so the UI can briefly show stale rip progress.
   Cosmetic.
 
+### 2026-08-27 — the TV flow
+
+The manual flow this replaces: rename the disc label, open TMDB in a browser,
+find the show, count the episodes in the season, work out which of them are on
+this disc, come back, type a range.
+
+**Two label bugs made it necessary.** THE_WINGFEATHER_SAGA_S1 was searched as
+"the wingfeather saga s1", which returns nothing -- so that job stopped for a
+human who then hand-corrected fourteen mapping rows, one per second, visible in
+the log. Only the spelled-out season and disc words were stripped, never the
+abbreviated forms every DVD actually uses. The season was lost at the same
+moment for an unrelated reason: extraction ran `s(\d{1,2})` against the raw
+label, and an underscore is a word character, so there is no boundary in
+SAGA_S1 and it never matched. Both fixed; the disc number is parsed too.
+
+**The card now does the lookup.** It prefills a search from the cleaned label,
+lists matching shows, and shows every season with its real episode count.
+Picking a season fills the number in; saying how many discs the set has fills
+in the range, since a season is cut evenly with the remainder going to the
+earlier discs. A range appears only when both the disc number and the set size
+are known -- a wrong prefill is worse than an empty box. The arithmetic is
+mirrored in lib.ts so the card responds without a round-trip, and both copies
+are tested against the same cases, including that the ranges tile a season
+exactly.
+
+**Compilation discs are a different shape entirely.** MINNIES_PET_SALON and
+I_HEART_MINNIE return zero TMDB results: they are DVD titles, not shows. They
+are themed collections of Mickey Mouse Clubhouse episodes drawn from across all
+four seasons -- nineteen Clubhouse episodes have "Minnie" in the name. The old
+model fetched one season, applied a contiguous range, and wrote that one season
+number onto every row. A compilation scope now takes the whole show as its
+candidate set and uses the name matching that already existed for menu text and
+OCR; each row takes the season of the episode it matched. Specials are asked
+per disc and default to off, since including them takes Clubhouse from 123
+candidates to 170.
+
+294 backend tests, 59 frontend.
+
 ### 2026-08-27 — two Chipmunks discs, four bugs
 
 **Aspect-ratio junk broke the search.** ALVIN_AND_THE_CHIPMUNKS_4X3 was sent
