@@ -1479,7 +1479,7 @@ export default function App() {
                               ...value,
                               form: {
                                 ...value.form,
-                                discScope: e.target.value as "full_season" | "partial_season" | "special" | "custom",
+                                discScope: e.target.value as "full_season" | "partial_season" | "special" | "custom" | "compilation",
                               },
                             }))
                           }
@@ -1487,8 +1487,32 @@ export default function App() {
                           <option value="full_season">Full season</option>
                           <option value="partial_season">Partial season</option>
                           <option value="special">Special</option>
+                          <option value="compilation">Compilation (episodes from any season)</option>
                           <option value="custom">Custom</option>
                         </select>
+                      </label>
+                    ) : null}
+                    {card.form.mediaType === "tv" && card.form.discScope === "compilation" ? (
+                      <label className="compilation-specials">
+                        <input
+                          type="checkbox"
+                          checked={card.form.includeSpecials ?? false}
+                          onChange={(e) =>
+                            updateDriveCard(card.id, (value) => ({
+                              ...value,
+                              form: { ...value.form, includeSpecials: e.target.checked },
+                            }))
+                          }
+                        />
+                        <span>
+                          Also match the show&apos;s specials
+                          {lookup.detail
+                            ? (() => {
+                                const specials = lookup.detail.seasons.find((s) => s.is_specials);
+                                return specials ? ` (${specials.episode_count} of them)` : "";
+                              })()
+                            : ""}
+                        </span>
                       </label>
                     ) : null}
                     {showMovieMode ? (

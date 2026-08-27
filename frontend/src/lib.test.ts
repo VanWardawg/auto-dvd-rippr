@@ -402,3 +402,50 @@ describe("suggestEpisodeRange", () => {
     expect(suggestEpisodeRange(3, 1, 8)).toBeNull();
   });
 });
+
+describe("compilation discs", () => {
+  const base: StartJobRequest = { discLabel: "MINNIES_PET_SALON", mediaType: "tv" };
+
+  it("sends the specials choice, which is the only setting it has", () => {
+    const out = normalizeStartRequest({ ...base, discScope: "compilation", includeSpecials: true });
+    expect(out.includeSpecials).toBe(true);
+    expect(out.discScope).toBe("compilation");
+  });
+
+  it("defaults to leaving the specials out", () => {
+    // 47 specials against 123 episodes for Mickey Mouse Clubhouse -- opting in
+    // should be deliberate, not the default.
+    const out = normalizeStartRequest({ ...base, discScope: "compilation" });
+    expect(out.includeSpecials).toBe(false);
+  });
+
+  it("carries no season or episode range", () => {
+    // A compilation draws from anywhere in the show, so a range is meaningless
+    // and a season number would put the files in the wrong folder.
+    const out = normalizeStartRequest({
+      ...base,
+      discScope: "compilation",
+      seasonNumber: 2,
+      episodeRangeStart: 1,
+      episodeRangeEnd: 5,
+    });
+    expect(out.seasonNumber ?? null).toBeNull();
+    expect(out.episodeRangeStart ?? null).toBeNull();
+    expect(out.episodeRangeEnd ?? null).toBeNull();
+  });
+
+  it("does not leak the specials flag onto a movie", () => {
+    const out = normalizeStartRequest({ ...base, mediaType: "movie", includeSpecials: true });
+    expect(out.includeSpecials ?? null).toBeNull();
+  });
+
+  it("does not leak it onto an ordinary season disc", () => {
+    const out = normalizeStartRequest({
+      ...base,
+      discScope: "partial_season",
+      seasonNumber: 2,
+      includeSpecials: true,
+    });
+    expect(out.includeSpecials ?? null).toBeNull();
+  });
+});

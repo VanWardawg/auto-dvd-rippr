@@ -16,7 +16,7 @@ export interface JobSummary {
   media_type: "tv" | "movie";
   movie_mode?: "single" | "double_feature" | "trilogy";
   has_local_artifacts?: boolean;
-  disc_scope?: "full_season" | "partial_season" | "special" | "custom" | null;
+  disc_scope?: "full_season" | "partial_season" | "special" | "custom" | "compilation" | null;
   season_number?: number | null;
   episode_range_start?: number | null;
   episode_range_end?: number | null;
@@ -197,7 +197,9 @@ export interface StartJobRequest {
   opticalDrive?: string | null;
   mediaType: "tv" | "movie";
   movieMode?: "single" | "double_feature" | "trilogy";
-  discScope?: "full_season" | "partial_season" | "special" | "custom";
+  discScope?: "full_season" | "partial_season" | "special" | "custom" | "compilation";
+  /** Compilation discs only: also match against the show's specials. */
+  includeSpecials?: boolean;
   tmdbShowId?: number | null;
   seasonNumber?: number | null;
   episodeRangeStart?: number | null;

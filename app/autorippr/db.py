@@ -197,7 +197,7 @@ CREATE TABLE IF NOT EXISTS job_progress (
 # writing progress at the same time. Gating on PRAGMA user_version means the
 # DDL runs once per schema change instead. Forget to bump it and your new
 # table will not appear on existing databases.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def open_db(db_path: str) -> sqlite3.Connection:
@@ -250,6 +250,11 @@ def _apply_best_effort_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE jobs ADD COLUMN episode_range_start INTEGER")
     if "episode_range_end" not in columns:
         conn.execute("ALTER TABLE jobs ADD COLUMN episode_range_end INTEGER")
+    if "include_specials" not in columns:
+        # Whether a compilation disc may draw on the specials is a property of
+        # the disc, not of the show: a themed Disney DVD often pulls from them,
+        # a "season 2 highlights" disc never does.
+        conn.execute("ALTER TABLE jobs ADD COLUMN include_specials INTEGER NOT NULL DEFAULT 0")
     if "awaiting_review" not in columns:
         conn.execute("ALTER TABLE jobs ADD COLUMN awaiting_review INTEGER NOT NULL DEFAULT 0")
     split_columns = {row["name"] for row in conn.execute("PRAGMA table_info(split_plans)").fetchall()}

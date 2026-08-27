@@ -117,7 +117,7 @@ export async function planSplits(jobId: string): Promise<void> {
 
 export async function updateJobProfile(
   jobId: string,
-  discScope: "full_season" | "partial_season" | "special" | "custom",
+  discScope: "full_season" | "partial_season" | "special" | "custom" | "compilation",
   seasonNumber?: number | null,
   episodeRangeStart?: number | null,
   episodeRangeEnd?: number | null,

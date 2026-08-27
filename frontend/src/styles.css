@@ -1670,3 +1670,20 @@ input::placeholder {
   flex-direction: column;
   gap: 0.5rem;
 }
+
+/* The specials toggle only appears for a compilation disc, where whether the
+   show's specials are in scope is genuinely a per-disc question. */
+.compilation-specials {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.compilation-specials input {
+  width: auto;
+  margin: 0;
+}

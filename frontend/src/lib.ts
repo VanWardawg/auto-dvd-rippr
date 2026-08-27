@@ -250,6 +250,17 @@ export function normalizeStartRequest(form: StartJobRequest): StartJobRequest {
       movieMode: form.movieMode,
     };
   }
+  if (form.discScope === "compilation") {
+    // A compilation holds episodes from across the show, so there is no season
+    // and no range to send -- only whether the specials are in scope.
+    return {
+      discLabel: form.discLabel.trim(),
+      opticalDrive: form.opticalDrive ?? null,
+      mediaType: form.mediaType,
+      discScope: form.discScope,
+      includeSpecials: form.includeSpecials ?? false,
+    };
+  }
   if (form.discScope === "partial_season") {
     return {
       discLabel: form.discLabel.trim(),

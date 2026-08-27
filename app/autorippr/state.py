@@ -62,6 +62,7 @@ def create_job(
     media_type: str = "tv",
     movie_mode: str = "single",
     disc_scope: str | None = None,
+    include_specials: bool = False,
     season_number: int | None = None,
     episode_range_start: int | None = None,
     episode_range_end: int | None = None,
@@ -71,10 +72,11 @@ def create_job(
     conn.execute(
         """
         INSERT INTO jobs (
-            id, disc_label, optical_drive, media_type, movie_mode, disc_scope, season_number, episode_range_start, episode_range_end,
+            id, disc_label, optical_drive, media_type, movie_mode, disc_scope, include_specials,
+            season_number, episode_range_start, episode_range_end,
             status, current_stage, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', ?, ?)
         """,
         (
             job_id,
@@ -83,6 +85,7 @@ def create_job(
             media_type,
             movie_mode,
             disc_scope,
+            1 if include_specials else 0,
             season_number,
             episode_range_start,
             episode_range_end,
@@ -107,6 +110,7 @@ def update_job_disc_profile(
     job_id: str,
     disc_scope: str | None,
     movie_mode: str | None,
+    include_specials: bool | None,
     season_number: int | None,
     episode_range_start: int | None,
     episode_range_end: int | None,
@@ -114,12 +118,15 @@ def update_job_disc_profile(
     conn.execute(
         """
         UPDATE jobs
-        SET disc_scope = ?, movie_mode = COALESCE(?, movie_mode), season_number = ?, episode_range_start = ?, episode_range_end = ?, updated_at = ?
+        SET disc_scope = ?, movie_mode = COALESCE(?, movie_mode),
+            include_specials = COALESCE(?, include_specials),
+            season_number = ?, episode_range_start = ?, episode_range_end = ?, updated_at = ?
         WHERE id = ?
         """,
         (
             disc_scope,
             movie_mode,
+            None if include_specials is None else (1 if include_specials else 0),
             season_number,
             episode_range_start,
             episode_range_end,

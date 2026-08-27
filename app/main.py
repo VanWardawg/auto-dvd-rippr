@@ -522,14 +522,21 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--optical-drive", default=None)
     create.add_argument("--media-type", default="tv", choices=["tv", "movie"])
     create.add_argument("--movie-mode", default="single", choices=["single", "double_feature", "trilogy"])
-    create.add_argument("--disc-scope", default=None, choices=["full_season", "partial_season", "special", "custom"])
+    create.add_argument("--disc-scope", default=None, choices=["full_season", "partial_season", "special", "custom", "compilation"])
+    create.add_argument(
+        "--include-specials",
+        action="store_true",
+        help="For a compilation disc, also match against the show's specials",
+    )
     create.add_argument("--season-number", type=int, default=None)
     create.add_argument("--episode-range-start", type=int, default=None)
     create.add_argument("--episode-range-end", type=int, default=None)
 
     profile = job_sub.add_parser("set-profile", help="Update disc scope/season/range")
     profile.add_argument("job_id")
-    profile.add_argument("--disc-scope", default=None, choices=["full_season", "partial_season", "special", "custom"])
+    profile.add_argument("--disc-scope", default=None, choices=["full_season", "partial_season", "special", "custom", "compilation"])
+    profile.add_argument("--include-specials", dest="include_specials", action="store_true", default=None)
+    profile.add_argument("--no-include-specials", dest="include_specials", action="store_false")
     profile.add_argument("--movie-mode", default=None, choices=["single", "double_feature", "trilogy"])
     profile.add_argument("--season-number", type=int, default=None)
     profile.add_argument("--episode-range-start", type=int, default=None)
@@ -710,6 +717,7 @@ def main() -> int:
                 media_type=args.media_type,
                 movie_mode=args.movie_mode,
                 disc_scope=args.disc_scope,
+                include_specials=bool(getattr(args, "include_specials", False)),
                 season_number=args.season_number,
                 episode_range_start=args.episode_range_start,
                 episode_range_end=args.episode_range_end,
@@ -723,6 +731,7 @@ def main() -> int:
                 args.job_id,
                 args.disc_scope,
                 args.movie_mode,
+                args.include_specials,
                 args.season_number,
                 args.episode_range_start,
                 args.episode_range_end,

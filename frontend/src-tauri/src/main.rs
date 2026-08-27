@@ -19,6 +19,7 @@ struct StartJobRequest {
     media_type: String,
     movie_mode: Option<String>,
     disc_scope: Option<String>,
+    include_specials: Option<bool>,
     season_number: Option<i64>,
     episode_range_start: Option<i64>,
     episode_range_end: Option<i64>,
@@ -250,6 +251,11 @@ fn start_pipeline(request: StartJobRequest) -> Result<String, String> {
     if let Some(movie_mode) = request.movie_mode {
         create_args.push("--movie-mode".into());
         create_args.push(movie_mode);
+    }
+    // Only meaningful for a compilation disc, and the CLI treats its absence
+    // as "no", so there is nothing to push when it is false.
+    if request.include_specials.unwrap_or(false) {
+        create_args.push("--include-specials".into());
     }
     if let Some(season) = request.season_number {
         create_args.push("--season-number".into());

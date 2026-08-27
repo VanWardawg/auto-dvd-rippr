@@ -26,6 +26,11 @@ class EpisodeTarget:
     episode_number: int
     tmdb_episode_id: int
     title: str
+    # Which season this episode belongs to. Every episode on a normal disc
+    # shares one, but a compilation draws from across the show, and
+    # episode_mappings has always stored the season per row -- it was simply
+    # given the same value every time.
+    season_number: int = 1
 
 
 def analyze_dvd_menu(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
@@ -111,6 +116,73 @@ def analyze_dvd_menu(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
     }
 
 
+
+
+def _season_for_row(
+    row: dict[str, Any],
+    season_by_episode_id: dict[int, int],
+    default_season: int,
+) -> int:
+    """
+    Which season a planned mapping belongs to, taken from the episodes it claims.
+
+    episode_mappings has always stored a season per row; it was simply handed
+    the same one every time. A compilation disc holds episodes from across a
+    show, so each row needs the season of the episode it actually matched or
+    the file is named into the wrong one.
+    """
+    for episode_id in row.get("tmdb_episode_ids") or []:
+        season = season_by_episode_id.get(int(episode_id))
+        if season is not None:
+            return int(season)
+    return default_season
+
+
+def _fetch_compilation_episodes(
+    conn,
+    cfg: AppConfig,
+    tmdb_show_id: int,
+    *,
+    include_specials: bool,
+) -> list[dict[str, Any]]:
+    """
+    Every episode of a show, for a disc that draws from all over it.
+
+    A themed DVD like "Minnie's Pet Salon" is not a season -- it is a handful
+    of Mickey Mouse Clubhouse episodes picked for their subject, from wherever
+    in the run they happened to air. There is no range to apply and no disc
+    order to trust, so the whole show becomes the candidate set and the
+    episodes are identified by name.
+
+    Specials are included only when asked for. Mickey Mouse Clubhouse has 47
+    of them against 123 episodes total, so pulling them in nearly doubles the
+    search space -- worth it when the disc really does draw on them, and just
+    more chances for a wrong name match when it does not.
+    """
+    detail = _cached_show_detail(conn, cfg, tmdb_show_id)
+    season_numbers = [
+        int(season.get("season_number"))
+        for season in (detail.get("seasons") or [])
+        if isinstance(season.get("season_number"), int)
+    ]
+    if not include_specials:
+        season_numbers = [number for number in season_numbers if number != 0]
+
+    episodes: list[dict[str, Any]] = []
+    for number in sorted(season_numbers):
+        for episode in fetch_tmdb_tv_episodes(conn, cfg, tmdb_show_id, number):
+            enriched = dict(episode)
+            enriched["season_number"] = number
+            episodes.append(enriched)
+    return episodes
+
+
+def _cached_show_detail(conn, cfg: AppConfig, tmdb_show_id: int) -> dict[str, Any]:
+    from .tmdb import fetch_tv_show_seasons
+
+    return fetch_tv_show_seasons(conn, cfg, tmdb_show_id)
+
+
 def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
     selected = conn.execute(
         """
@@ -122,6 +194,7 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
             jsm.season_number,
             jsm.order_mode,
             j.disc_scope,
+            j.include_specials,
             j.episode_range_start,
             j.episode_range_end
         FROM job_selected_media jsm
@@ -138,9 +211,20 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
         raise MappingError("MVP mapping currently supports TV only.")
 
     season_number = selected["season_number"] if selected["season_number"] is not None else 1
-    episodes = fetch_tmdb_tv_episodes(conn, cfg, int(selected["tmdb_id"]), int(season_number))
-    if not episodes:
-        raise TmdbError(f"No TMDB episodes found for show={selected['tmdb_id']} season={season_number}")
+    disc_scope_early = str(selected["disc_scope"] or "")
+    if disc_scope_early == "compilation":
+        episodes = _fetch_compilation_episodes(
+            conn,
+            cfg,
+            int(selected["tmdb_id"]),
+            include_specials=bool(selected["include_specials"]),
+        )
+        if not episodes:
+            raise TmdbError(f"No TMDB episodes found for show={selected['tmdb_id']}")
+    else:
+        episodes = fetch_tmdb_tv_episodes(conn, cfg, int(selected["tmdb_id"]), int(season_number))
+        if not episodes:
+            raise TmdbError(f"No TMDB episodes found for show={selected['tmdb_id']} season={season_number}")
 
     rip_rows = conn.execute(
         """
@@ -159,6 +243,7 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
             episode_number=int(e["episode_number"]),
             tmdb_episode_id=int(e["id"]),
             title=str(e["name"]),
+            season_number=int(e.get("season_number", season_number) or season_number),
         )
         for e in episodes
     ]
@@ -174,6 +259,11 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
 
     _clear_downstream_state_for_remap(conn, cfg, job_id)
     planned = _plan_mappings(rip_rows, targets, cfg, job_id)
+    # Rows are built at several points in the planner, so the season is derived
+    # here from the episodes each row actually claims rather than threaded
+    # through every one of them. For a normal disc every target shares a
+    # season and this is a no-op; for a compilation it is the whole point.
+    season_by_episode_id = {t.tmdb_episode_id: t.season_number for t in targets}
     conn.execute("DELETE FROM episode_mappings WHERE job_id = ?", (job_id,))
     for row in planned:
         conn.execute(
@@ -187,7 +277,7 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
             (
                 job_id,
                 row["rip_title_id"],
-                int(season_number),
+                _season_for_row(row, season_by_episode_id, int(season_number)),
                 row["episode_start"],
                 row["episode_end"],
                 json.dumps(row["tmdb_episode_ids"], ensure_ascii=True),
