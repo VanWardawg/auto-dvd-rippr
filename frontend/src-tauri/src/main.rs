@@ -516,13 +516,42 @@ fn open_path(path: String) -> Result<(), String> {
 fn spawn_python_background(args: &[&str]) -> Result<(), String> {
     let runtime = resolve_runtime_paths()?;
     let mut command = build_python_command(&runtime, args)?;
+    // The pipeline runs detached, so this file is the only place its crash can
+    // ever be seen. Discarding stderr cost a real job: the backend died
+    // mid-rip, the traceback went nowhere, and the job sat in `ripping`
+    // forever with an orphaned MakeMKV still spinning the disc.
+    let errors = open_backend_error_log(&runtime);
     command
         .current_dir(&runtime.working_dir)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(errors)
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Append-only log for detached backend crashes, next to the user's config.
+///
+/// Falls back to discarding output rather than failing the spawn: not being
+/// able to write a log is never a good reason to refuse to start a rip.
+fn open_backend_error_log(runtime: &RuntimePaths) -> Stdio {
+    let Some(dir) = runtime.config_path.parent() else {
+        return Stdio::null();
+    };
+    let path = dir.join("backend-errors.log");
+    // Truncate rather than grow without bound: a backend crashing in a loop
+    // should not be able to fill the user's disk.
+    if let Ok(meta) = fs::metadata(&path) {
+        if meta.len() > 1_000_000 {
+            let _ = fs::remove_file(&path);
+        }
+    }
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map(Stdio::from)
+        .unwrap_or(Stdio::null())
 }
 
 fn run_python_json(args: &[&str]) -> Result<Value, String> {

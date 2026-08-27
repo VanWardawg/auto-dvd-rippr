@@ -6,12 +6,15 @@ from typing import Any
 from .config import AppConfig
 from .mapper import MappingError, analyze_dvd_menu, map_job_episodes
 from .job_ops import purge_local_files
+from .logger import get_logger
 from .naming import NamingError, finalize_job_outputs
 from .rip import RipError, eject_drive, execute_rip_job, recover_completed_rip
 from .splitter import SplitError, execute_splits, plan_splits_for_job
 from .state import InvalidTransitionError, append_job_log, get_job, set_awaiting_review, transition_job
 from .tmdb import TmdbError, identify_job_with_tmdb
 from .transfer import TransferError, ensure_nas_available, transfer_job_outputs
+
+log = get_logger("pipeline")
 
 
 def resume_incomplete_jobs(conn, cfg: AppConfig, mock_rip: bool = False) -> list[dict[str, Any]]:
@@ -375,6 +378,31 @@ def run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = Fal
     except (RipError, TmdbError, MappingError, SplitError, NamingError, TransferError) as exc:
         _transition_job_to_error_if_active(conn, job_id, str(exc))
         raise
+    except BaseException as exc:
+        # Anything not on the domain list -- a locked database, an OS error, a
+        # bug -- used to propagate straight past here, killing the process with
+        # the job still sitting in its active status. That left a zombie: the
+        # UI showed it as ripping forever, the MakeMKV child kept running with
+        # nobody reading it, and Resume was unavailable because Resume only
+        # applies to errored jobs. Marking it errored is what makes the work
+        # recoverable instead of lost.
+        _mark_error_best_effort(conn, job_id, f"{type(exc).__name__}: {exc}")
+        raise
+
+
+def _mark_error_best_effort(conn, job_id: str, message: str) -> None:
+    """
+    Record the error without ever raising a second exception.
+
+    The most likely reason for landing here is that the database is
+    unavailable -- which is also the reason writing the error state might
+    fail. A failure here must not replace the original exception, because the
+    original is the one worth seeing in the log.
+    """
+    try:
+        _transition_job_to_error_if_active(conn, job_id, message)
+    except BaseException:  # noqa: BLE001 - deliberately swallowing
+        log.exception("could not record job error state", extra={"job_id": job_id})
 
 
 def _should_retry_identify_with_menu_analysis(cfg: AppConfig, job_id: str, media_type: str) -> bool:

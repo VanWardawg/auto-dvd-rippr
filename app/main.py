@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +101,27 @@ def _job_has_local_artifacts(staging_root: str, job_id: str) -> bool:
 # review. Long enough to survive MakeMKV retrying a scratched sector, short
 # enough that a genuinely wedged rip does not burn an evening.
 STALL_WARN_SECONDS = 60.0
+# The rip loop writes a progress heartbeat every second, so a row that has not
+# been touched in three minutes means the process writing it is gone -- not
+# that the disc is slow.
+ABANDONED_RIP_SECONDS = 180.0
+
+
+def _seconds_since_heartbeat(progress_row: dict[str, Any] | None) -> float | None:
+    """
+    Seconds since anything wrote to the progress row at all, by wall clock.
+
+    This is the check that catches a dead writer. Comparing the row against
+    itself cannot: when the process writing it dies, updated_at and
+    last_advance_at freeze at the same instant, so the difference stays zero
+    and the job reads as perfectly healthy forever.
+    """
+    if not progress_row:
+        return None
+    updated = _parse_iso_timestamp(progress_row.get("updated_at"))
+    if updated is None:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - updated).total_seconds())
 
 
 def _seconds_since_last_advance(progress_row: dict[str, Any] | None) -> float | None:
@@ -404,8 +426,22 @@ def _build_review_state(
         # A rip is stalled when MakeMKV keeps reporting but stops advancing.
         # job_progress tracks both separately: updated_at moves on every
         # heartbeat, last_advance_at only when the work actually progressed.
+        # Tested before the stall check, because a dead writer looks perfectly
+        # healthy to that check: it compares the row against itself, and both
+        # of its timestamps freeze together when the process writing them dies.
+        abandoned_seconds = _seconds_since_heartbeat(progress_row)
         stall_seconds = _seconds_since_last_advance(progress_row)
-        if stall_seconds is not None and stall_seconds >= STALL_WARN_SECONDS:
+        if abandoned_seconds is not None and abandoned_seconds >= ABANDONED_RIP_SECONDS:
+            rip_needed = True
+            rip_reason = (
+                "The rip was abandoned: the backend process stopped reporting. "
+                "MakeMKV may still be running in the background."
+            )
+            rip_details.append(
+                f"No progress heartbeat for {int(abandoned_seconds)}s, "
+                "and the rip writes one every second."
+            )
+        elif stall_seconds is not None and stall_seconds >= STALL_WARN_SECONDS:
             rip_needed = True
             rip_reason = "Rip appears stalled: MakeMKV has not made progress for about a minute."
             rip_details.append(
@@ -1232,6 +1268,14 @@ def main() -> int:
                 TransferError,
             ) as exc:
                 print(f"Pipeline error: {exc}", file=sys.stderr)
+                return 11
+            except Exception:
+                # An unexpected exception here used to escape main() and take
+                # the process down with a traceback that went nowhere, because
+                # the UI spawns this detached with stderr discarded. The job
+                # was left mid-stage with no error recorded anywhere.
+                log.exception("pipeline run failed unexpectedly", extra={"job_id": args.job_id})
+                traceback.print_exc(file=sys.stderr)
                 return 11
         if args.pipeline_command == "resume-all":
             try:

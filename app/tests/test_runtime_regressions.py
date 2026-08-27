@@ -1,5 +1,6 @@
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,6 +41,11 @@ def build_test_config(staging_root: str, db_path: str, log_path: str) -> AppConf
         log_path=log_path,
     )
 
+
+
+def _recent(seconds_ago: float) -> str:
+    """An ISO timestamp `seconds_ago` in the past, as a live rip would write."""
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
 
 class RuntimeRegressionTests(unittest.TestCase):
     def test_pipeline_moves_job_to_error_when_rip_raises(self) -> None:
@@ -90,8 +96,8 @@ class RuntimeRegressionTests(unittest.TestCase):
                 "stage": "ripping",
                 "current_units": 1024.0,
                 "total_units": 65536.0,
-                "updated_at": "2026-08-15T02:08:04+00:00",
-                "last_advance_at": "2026-08-15T02:07:04+00:00",
+                "updated_at": _recent(0),
+                "last_advance_at": _recent(60),
             }
 
             review = cli_main._build_review_state(
@@ -132,8 +138,8 @@ class RuntimeRegressionTests(unittest.TestCase):
                 "stage": "ripping",
                 "current_units": 32768.0,
                 "total_units": 65536.0,
-                "updated_at": "2026-08-15T02:08:04+00:00",
-                "last_advance_at": "2026-08-15T02:08:03+00:00",
+                "updated_at": _recent(0),
+                "last_advance_at": _recent(1),
             }
 
             review = cli_main._build_review_state(
