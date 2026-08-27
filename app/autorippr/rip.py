@@ -608,6 +608,18 @@ def _run_makemkv_rip_streaming(
             lf.write(f"\nEXIT_CODE: {exit_code}\n")
             lf.flush()
 
+            # MakeMKV exits 0 even when it saved nothing at all: an unreadable
+            # disc produces "0 titles saved, 1 failed" and a clean exit code.
+            # Trusting the exit code meant the caller saw success, found no
+            # files, and reported a baffling "rip completed but no MKV files
+            # were found" instead of the read errors that actually happened --
+            # and the alternate-title retry, which keys off failure, could
+            # never fire on the very discs it exists for.
+            if exit_code == 0 and not _new_outputs(output_dir, before):
+                lf.write("\nNOTE: exited 0 but saved no titles; treating as a failure.\n")
+                lf.flush()
+                exit_code = MAKEMKV_SAVED_NOTHING
+
             if exit_code != 0:
                 exit_code = _retry_title_with_alternates(
                     conn=conn,
@@ -633,6 +645,16 @@ def _run_makemkv_rip_streaming(
         log_text = ""
     return log_text, exit_code
 
+
+
+
+# MakeMKV has no distinct exit code for "I saved nothing", so we supply one.
+MAKEMKV_SAVED_NOTHING = -2
+
+
+def _new_outputs(output_dir: Path, before: set[str]) -> set[str]:
+    """Which MKVs appeared since `before` was taken."""
+    return {path.name for path in output_dir.glob("*.mkv")} - before
 
 
 def _selector_title_id(selector: str) -> int:
@@ -722,6 +744,10 @@ def _retry_title_with_alternates(
         )
         log_file.write(f"\nEXIT_CODE: {exit_code}\n")
         log_file.flush()
+        if exit_code == 0 and not _new_outputs(output_dir, keep):
+            log_file.write("\nNOTE: alternate exited 0 but saved no titles.\n")
+            log_file.flush()
+            exit_code = MAKEMKV_SAVED_NOTHING
         if exit_code == 0:
             append_job_log(
                 conn=conn,
@@ -908,10 +934,23 @@ def _describe_makemkv_failure(log_text: str, log_path: Path) -> str:
             f"available disk space. See log: {log_path}"
         )
 
-    if "encountered" in lowered and "hash check" in lowered:
+    # Matches both "hash check" and the far more common "Read Error" wording.
+    # Requiring "hash check" meant a disc with eleven documented read errors
+    # fell through to the generic message and told the user nothing.
+    read_errors = re.search(r"encountered (\d+) errors of type '([^']+)'", lowered)
+    if read_errors or "uncorrectable" in lowered or "status_device_data_error" in lowered:
+        count = f"{read_errors.group(1)} " if read_errors else ""
         return (
-            "MakeMKV hit unreadable sectors on this disc. Clean the disc and retry; if it "
-            f"persists the disc may be damaged. See log: {log_path}"
+            f"MakeMKV hit {count}unreadable sector(s) on this disc. Clean it with a "
+            "lint-free cloth, wiping from the centre straight outward rather than in "
+            "circles, and retry. If it persists, try the other drive -- drives differ "
+            f"in how well they read worn media. See log: {log_path}"
+        )
+
+    if "titles saved" in lowered and "0 titles saved" in lowered:
+        return (
+            "MakeMKV finished without saving anything. The disc may be damaged, "
+            f"copy-protected in a way this version cannot handle, or empty. See log: {log_path}"
         )
 
     return f"MakeMKV failed with non-zero exit code. See log: {log_path}"

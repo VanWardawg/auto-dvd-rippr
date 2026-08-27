@@ -337,7 +337,12 @@ class AlternateRetryTests(unittest.TestCase):
 
         def fake_stream(**kwargs):
             attempts.append(list(kwargs["cmd"]))
-            return outcomes[len(attempts) - 1]
+            code = outcomes[len(attempts) - 1]
+            if code == 0:
+                # A rip that succeeds always leaves a file; the retry now
+                # checks for one, because MakeMKV exits 0 having saved nothing.
+                (out / f"C1_t{kwargs['cmd'][-2]:0>2}.mkv").write_text("data")
+            return code
 
         with patch.object(rip, "_stream_one_makemkv_rip", side_effect=fake_stream), patch.object(
             rip, "_ensure_job_still_ripping"
@@ -367,13 +372,14 @@ class AlternateRetryTests(unittest.TestCase):
 
     def test_the_broken_half_file_is_not_left_behind(self) -> None:
         # Otherwise the pipeline finds two MKVs and treats the truncated one as
-        # a ripped title.
+        # a ripped title alongside the good retry.
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
             (out / "C1_t01.mkv").write_text("truncated")
             code, _ = self._retry([0], [0], out)
             self.assertEqual(code, 0)
-            self.assertEqual(list(out.glob("*.mkv")), [])
+            names = sorted(path.name for path in out.glob("*.mkv"))
+            self.assertEqual(names, ["C1_t00.mkv"], "only the good retry should remain")
 
     def test_every_twin_is_tried_before_giving_up(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -396,3 +402,95 @@ class AlternateRetryTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(len(attempts), 2)
 
+
+
+class ExitCodeZeroFailureTests(unittest.TestCase):
+    """
+    MakeMKV exits 0 even when it saves nothing.
+
+    From a real BARBIE_A_FASHION_FAIRYTALE disc: eleven read errors,
+    "0 titles saved, 1 failed", "Copy complete", and EXIT_CODE: 0. Trusting
+    that exit code made the caller report "rip completed but no MKV files were
+    found" -- and meant the alternate-title retry, which only runs on failure,
+    could never fire on the damaged discs it exists for.
+    """
+
+    def _run(self, *, creates_file: bool, title_ids=None, alternates=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "out"
+            out.mkdir()
+            fake_exe = root / "makemkvcon64.exe"
+            fake_exe.write_text("")
+            calls: list[list[str]] = []
+
+            def fake_stream(**kwargs):
+                calls.append(list(kwargs["cmd"]))
+                if creates_file:
+                    (out / f"C1_t{len(calls):02d}.mkv").write_text("data")
+                return 0
+
+            with patch.object(rip, "_resolve_makemkv_cli_path", return_value=fake_exe), patch.object(
+                rip, "_stream_one_makemkv_rip", side_effect=fake_stream
+            ), patch.object(rip, "_ensure_job_still_ripping"), patch.object(rip, "append_job_log"):
+                _, exit_code = rip._run_makemkv_rip_streaming(
+                    conn=unittest.mock.MagicMock(),
+                    job_id="job",
+                    makemkv_path=str(fake_exe),
+                    output_dir=out,
+                    log_path=root / "makemkv.log",
+                    source_spec="dev:E:",
+                    timeout_seconds=600,
+                    title_ids=title_ids or [1],
+                    title_alternates=alternates,
+                )
+            return exit_code, calls
+
+    def test_saving_nothing_is_a_failure_despite_exit_zero(self) -> None:
+        exit_code, _ = self._run(creates_file=False)
+        self.assertNotEqual(exit_code, 0)
+
+    def test_a_real_rip_still_succeeds(self) -> None:
+        exit_code, _ = self._run(creates_file=True)
+        self.assertEqual(exit_code, 0)
+
+    def test_saving_nothing_triggers_the_alternate_retry(self) -> None:
+        # The whole point: without this, a damaged disc's twin is never tried.
+        _, calls = self._run(creates_file=False, title_ids=[1], alternates={1: [0]})
+        self.assertGreaterEqual(len(calls), 2, "the alternate title was never attempted")
+        self.assertEqual(calls[1][-2], "0")
+
+
+class FailureDescriptionTests(unittest.TestCase):
+    """The message is the only thing the user sees; it has to name the cause."""
+
+    REAL_LOG = (
+        'MSG:2003,0,3,"Error \'Scsi error - MEDIUM ERROR:L-EC UNCORRECTABLE ERROR\' occurred '
+        "while reading '/VIDEO_TS/VTS_01_1.VOB' at offset '967847936'\"\n"
+        'MSG:2023,131072,3,"Encountered 11 errors of type \'Read Error\' - see '
+        'http://www.makemkv.com/errors/dvdread/"\n'
+        'MSG:5004,128,2,"0 titles saved, 1 failed"\n'
+    )
+
+    def test_read_errors_are_named_and_counted(self) -> None:
+        # The old branch required the words "hash check", so this exact log --
+        # eleven documented read errors -- fell through to "failed with
+        # non-zero exit code", which is both useless and untrue here.
+        msg = rip._describe_makemkv_failure(self.REAL_LOG, Path("mk.log"))
+        self.assertIn("11", msg)
+        self.assertNotIn("non-zero exit code", msg)
+
+    def test_it_tells_the_user_what_to_do(self) -> None:
+        msg = rip._describe_makemkv_failure(self.REAL_LOG, Path("mk.log")).lower()
+        self.assertIn("clean", msg)
+        self.assertIn("centre straight outward", msg)
+        self.assertIn("other drive", msg)
+
+    def test_saving_nothing_without_read_errors_is_still_explained(self) -> None:
+        msg = rip._describe_makemkv_failure('MSG:5004,128,2,"0 titles saved, 1 failed"', Path("m"))
+        self.assertNotIn("non-zero exit code", msg)
+        self.assertIn("without saving", msg.lower())
+
+    def test_an_unrecognised_failure_still_points_at_the_log(self) -> None:
+        msg = rip._describe_makemkv_failure("MSG:9999,0,0,\"something new\"", Path("mk.log"))
+        self.assertIn("mk.log", msg)
