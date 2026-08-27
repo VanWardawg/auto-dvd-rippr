@@ -29,6 +29,7 @@ class DiscHints:
     normalized_query: str
     detected_season: int | None
     detected_year: int | None
+    detected_disc: int | None = None
 
 
 def identify_job_with_tmdb(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
@@ -319,6 +320,7 @@ def parse_disc_hints(disc_label: str) -> DiscHints:
         normalized_query=normalized,
         detected_season=season,
         detected_year=year,
+        detected_disc=_extract_disc_number(text),
     )
 
 
@@ -491,6 +493,13 @@ def _normalize_query(text: str, preserve_numbers: bool = False) -> str:
     t = re.sub(r"[<>\[\]\(\)\{\}\"'`]+", " ", t)
     # strip common disc tokens
     t = re.sub(r"\b(disc|disk|dvd|vol|volume|season|ep|episode)\b", " ", t)
+    # ...including the abbreviated forms DVDs actually use. A disc labelled
+    # THE_WINGFEATHER_SAGA_S1 searched TMDB for "the wingfeather saga s1",
+    # which returns nothing, so the job stopped and waited for a human -- and
+    # every SHOW_S2_D1 label has the same problem.
+    t = re.sub(r"\bs\s?\d{1,2}\b", " ", t)
+    t = re.sub(r"\bd\s?\d{1,2}\b", " ", t)
+    t = re.sub(r"\bs\d{1,2}\s?e\d{1,3}\b", " ", t)
     # Authoring junk that belongs to the pressing, not the film: aspect ratio,
     # picture format, edition and broadcast standard. A disc labelled
     # ALVIN_AND_THE_CHIPMUNKS_4X3 searched TMDB for "alvin and the chipmunks
@@ -509,14 +518,42 @@ def _normalize_query(text: str, preserve_numbers: bool = False) -> str:
 
 
 def _extract_season(text: str) -> int | None:
+    """
+    Pull the season number out of a disc label.
+
+    Separators are flattened first because an underscore is a word character:
+    `\bs(\d+)\b` never matches THE_WINGFEATHER_SAGA_S1, since there is no
+    word boundary between the underscore and the S. Every disc following the
+    usual SHOW_S2_D1 convention silently lost its season this way.
+    """
     if not text:
         return None
+    flattened = re.sub(r"[_\-\.]+", " ", text)
     patterns = [
         r"(?i)\bseason\s*(\d{1,2})\b",
-        r"(?i)\bs(\d{1,2})\b",
+        r"(?i)\bs(\d{1,2})\s?e\d{1,3}\b",
+        r"(?i)\bs\s?(\d{1,2})\b",
     ]
     for pattern in patterns:
-        m = re.search(pattern, text)
+        m = re.search(pattern, flattened)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _extract_disc_number(text: str) -> int | None:
+    """
+    Which disc of a set this is, when the label says so.
+
+    A season rarely fits on one DVD, so SHOW_S2_D3 means "season 2, third
+    disc" -- which is what decides the episode range. Knowing it lets the app
+    offer a range instead of asking the user to work one out.
+    """
+    if not text:
+        return None
+    flattened = re.sub(r"[_\-\.]+", " ", text)
+    for pattern in (r"(?i)\bdis[ck]\s*(\d{1,2})\b", r"(?i)\bd\s?(\d{1,2})\b"):
+        m = re.search(pattern, flattened)
         if m:
             return int(m.group(1))
     return None

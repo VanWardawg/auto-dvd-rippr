@@ -1,7 +1,12 @@
 """
-Tests for turning a disc's volume label into the right film.
+Tests for turning a disc's volume label into the right title.
 
-Both cases here come from one evening's Alvin and the Chipmunks discs.
+A DVD's volume label is written by whoever authored the pressing, so it
+carries their concerns rather than the viewer's: aspect ratio, edition,
+season and disc numbers. Every case here is a real disc whose label sent the
+app somewhere wrong.
+
+The film cases come from one evening's Alvin and the Chipmunks discs.
 
 ALVIN_AND_THE_CHIPMUNKS_4X3 carries an aspect-ratio marker. Searching TMDB
 for "alvin and the chipmunks 4x3" returned nothing at all, so the job stopped
@@ -25,6 +30,8 @@ if str(APP_ROOT) not in sys.path:
 
 from autorippr.tmdb import (  # noqa: E402
     _franchise_position,
+    _normalize_identify_query,
+    parse_disc_hints,
     _normalize_query,
     _sequel_number_unexplained,
 )
@@ -32,6 +39,10 @@ from autorippr.tmdb import (  # noqa: E402
 
 def query(label: str) -> str:
     return _normalize_query(label, preserve_numbers=True)
+
+
+def tv_query(label: str) -> str:
+    return _normalize_identify_query(label, "tv")
 
 
 class DiscJunkTokenTests(unittest.TestCase):
@@ -131,6 +142,59 @@ class FranchisePositionTests(unittest.TestCase):
         mixed = self.ALVIN + [{"title": "Something Else Entirely", "year": 1990, "tmdb_id": 77}]
         self.assertEqual(_franchise_position(self.ALVIN[2], mixed), 3)
 
+
+
+class TvLabelTests(unittest.TestCase):
+    """
+    Season and disc markers are the standard DVD convention, and both of the
+    ways the app read them were broken.
+
+    THE_WINGFEATHER_SAGA_S1 searched TMDB for "the wingfeather saga s1" and
+    got nothing back, so the job stopped for a human. The season was lost at
+    the same time, for a different reason: an underscore is a word character,
+    so `\bs(\d+)\b` finds no boundary in SAGA_S1 and matched nothing.
+    """
+
+    def test_the_season_marker_is_kept_out_of_the_query(self) -> None:
+        self.assertEqual(tv_query("THE_WINGFEATHER_SAGA_S1"), "the wingfeather saga")
+
+    def test_the_disc_marker_is_kept_out_too(self) -> None:
+        self.assertEqual(tv_query("TUTTLE_TWINS_S1_D2"), "tuttle twins")
+
+    def test_spelled_out_markers_were_already_handled(self) -> None:
+        self.assertEqual(tv_query("PAW_PATROL_SEASON_3_DISC_2"), "paw patrol")
+
+    def test_the_season_survives_the_underscore(self) -> None:
+        self.assertEqual(parse_disc_hints("THE_WINGFEATHER_SAGA_S1").detected_season, 1)
+        self.assertEqual(parse_disc_hints("MICKEY_MOUSE_CLUBHOUSE_S2_D3").detected_season, 2)
+
+    def test_the_disc_number_is_read(self) -> None:
+        # Which disc of the set decides the episode range, so it is worth
+        # knowing before asking the user to work one out.
+        self.assertEqual(parse_disc_hints("TUTTLE_TWINS_S1_D2").detected_disc, 2)
+        self.assertEqual(parse_disc_hints("PAW_PATROL_SEASON_3_DISC_2").detected_disc, 2)
+
+    def test_two_discs_of_one_season_differ_only_by_disc(self) -> None:
+        first = parse_disc_hints("TUTTLE_TWINS_S1_D1")
+        second = parse_disc_hints("TUTTLE_TWINS_S1_D2")
+        self.assertEqual(first.detected_season, second.detected_season)
+        self.assertEqual(first.normalized_query, second.normalized_query)
+        self.assertNotEqual(first.detected_disc, second.detected_disc)
+
+    def test_an_episode_code_gives_the_season(self) -> None:
+        self.assertEqual(parse_disc_hints("SOME_SHOW_S02E05").detected_season, 2)
+
+    def test_a_compilation_disc_claims_no_season(self) -> None:
+        # Minnie's Pet Salon is a themed collection, not a season. Inventing a
+        # season number for it would be worse than admitting there is none.
+        for label in ("MINNIES_PET_SALON", "I_HEART_MINNIE"):
+            hints = parse_disc_hints(label)
+            self.assertIsNone(hints.detected_season, label)
+            self.assertIsNone(hints.detected_disc, label)
+
+    def test_a_compilation_title_is_left_intact(self) -> None:
+        self.assertEqual(tv_query("MINNIES_PET_SALON"), "minnies pet salon")
+        self.assertEqual(tv_query("I_HEART_MINNIE"), "i heart minnie")
 
 if __name__ == "__main__":
     unittest.main()
