@@ -88,6 +88,18 @@ def identify_job_with_tmdb(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
         selected = None
     else:
         needs_review = not selected or selected["score"] < threshold
+        if not needs_review and selected and _sequel_number_unexplained(disc_label, selected, same_type_ranked):
+            needs_review = True
+            append_job_log(
+                conn,
+                job_id,
+                "WARNING",
+                f"Disc label '{disc_label}' names a sequel number that "
+                f"'{selected.get('title')}' does not account for; asking rather than guessing.",
+                None,
+                None,
+            )
+            conn.commit()
         if needs_review and selected:
             auto_selected_by_heuristic = _should_auto_select_primary_candidate(
                 ranked=same_type_ranked,
@@ -479,6 +491,17 @@ def _normalize_query(text: str, preserve_numbers: bool = False) -> str:
     t = re.sub(r"[<>\[\]\(\)\{\}\"'`]+", " ", t)
     # strip common disc tokens
     t = re.sub(r"\b(disc|disk|dvd|vol|volume|season|ep|episode)\b", " ", t)
+    # Authoring junk that belongs to the pressing, not the film: aspect ratio,
+    # picture format, edition and broadcast standard. A disc labelled
+    # ALVIN_AND_THE_CHIPMUNKS_4X3 searched TMDB for "alvin and the chipmunks
+    # 4x3" and matched nothing at all, forcing a manual search that found the
+    # film immediately once the 4x3 was gone.
+    t = re.sub(
+        r"\b(4\s?x\s?3|16\s?x\s?9|full\s?screen|wide\s?screen|ws|fs|ntsc|pal|"
+        r"se|ce|dts|ac3|thx|remastered|anniversary\s?edition)\b",
+        " ",
+        t,
+    )
     if not preserve_numbers:
         t = re.sub(r"\b\d{1,2}\b", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
@@ -504,6 +527,98 @@ def _extract_year(text: str) -> int | None:
         return None
     m = re.search(r"\b(19\d{2}|20\d{2})\b", text)
     return int(m.group(1)) if m else None
+
+
+
+# Sequel numbers a title might spell out instead of printing as a digit.
+_SEQUEL_WORDS = {
+    2: ("2", "ii", "two", "second"),
+    3: ("3", "iii", "three", "third"),
+    4: ("4", "iv", "four", "fourth"),
+    5: ("5", "v", "five", "fifth"),
+    6: ("6", "vi", "six", "sixth"),
+    7: ("7", "vii", "seven", "seventh"),
+    8: ("8", "viii", "eight", "eighth"),
+    9: ("9", "ix", "nine", "ninth"),
+}
+
+
+def _franchise_position(selected: dict[str, Any], ranked: list[dict[str, Any]]) -> int | None:
+    """
+    Where the chosen film sits in its franchise, by release order.
+
+    "Alvin and the Chipmunks: Chipwrecked" carries no digit, but it is the
+    third film released under that name -- which explains a disc labelled
+    _3 just as well as printing the number would.
+
+    Only candidates sharing the chosen film's leading words count as
+    siblings, and every one of them needs a year, because the ordering is the
+    whole answer here and a guess at it is worse than declining to answer.
+    """
+    title = _normalize_identify_query(str(selected.get("title") or ""), "movie")
+    if not title:
+        return None
+    base = " ".join(title.split()[:3])
+    if not base:
+        return None
+
+    siblings = []
+    for candidate in ranked:
+        name = _normalize_identify_query(str(candidate.get("title") or ""), "movie")
+        year = candidate.get("year")
+        if not name.startswith(base):
+            continue
+        if not year:
+            return None
+        siblings.append((int(year), candidate.get("tmdb_id")))
+
+    if len(siblings) < 2:
+        return None
+    siblings.sort()
+    for index, (_, tmdb_id) in enumerate(siblings, start=1):
+        if tmdb_id == selected.get("tmdb_id"):
+            return index
+    return None
+
+
+def _sequel_number_unexplained(
+    disc_label: str,
+    selected: dict[str, Any],
+    ranked: list[dict[str, Any]] | None = None,
+) -> bool:
+    """
+    True when the label ends in a sequel number the chosen title never mentions.
+
+    ALVIN_AND_THE_CHIPMUNKS_3 is the third film, which TMDB calls "Alvin and
+    the Chipmunks: Chipwrecked" -- no digit in it anywhere. The base title
+    therefore scores highest, and at 0.786 against a 0.75 threshold it was
+    accepted without a question: the wrong film, silently, with the number
+    that said so sitting right there in the label. Only the NAS refusing to
+    overwrite the 2007 film caught it.
+
+    Titles that do carry the number -- "Shrek 2", "Toy Story 3", "Rocky II" --
+    explain themselves and are left alone.
+    """
+    if not disc_label:
+        return False
+    label = _normalize_query(disc_label, preserve_numbers=True)
+    match = re.search(r"\b([2-9])\s*$", label)
+    if not match:
+        return False
+
+    number = int(match.group(1))
+    title = str(selected.get("title") or "").lower()
+    title_tokens = set(re.findall(r"[a-z0-9]+", title))
+    if title_tokens & set(_SEQUEL_WORDS[number]):
+        return False
+
+    # A subtitled sequel names no number, so fall back to release order: being
+    # the Nth film released under this name accounts for a disc labelled _N.
+    if _franchise_position(selected, ranked or []) == number:
+        return False
+
+    # Otherwise the label carries information the chosen title cannot explain.
+    return True
 
 
 def _search_and_score_candidates(
