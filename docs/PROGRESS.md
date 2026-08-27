@@ -57,8 +57,10 @@ target the waiting, not the compute.
   while a 75-minute film takes 84 minutes. Measured 4.8x vs 1.05x on two
   drives of the same machine, same night, near-identical discs.
 
-- **Strip disc-junk tokens from labels.** `PRINCESS_BRIDE_CE`, `EVERAFTER169`
-  (16:9), `PAW_PATROL_NA`, `THESECRETLIFEOFWALTERMITTY` (no spaces).
+- **Strip disc-junk tokens still glued to the title.** The separated cases are
+  handled (`PRINCESS_BRIDE_CE`, `_4X3`, `_WS`). Still open: `EVERAFTER169`
+  (16:9 with no separator), `PAW_PATROL_NA`, and
+  `THESECRETLIFEOFWALTERMITTY` (no spaces at all).
 - **Batch review queue** so several discs can be cleared in one sitting.
 - **Cap menu analysis runtime.** Median is 1.1 min but one job burned 11 min
   for nothing. A 3 min ceiling costs nothing.
@@ -67,6 +69,38 @@ target the waiting, not the compute.
   `clear_job_local_artifacts` and `clear_job_output_artifacts` leave the
   `job_progress` row behind, so the UI can briefly show stale rip progress.
   Cosmetic.
+
+### 2026-08-27 — two Chipmunks discs, four bugs
+
+**Aspect-ratio junk broke the search.** ALVIN_AND_THE_CHIPMUNKS_4X3 was sent
+to TMDB verbatim and matched nothing, so the job stopped for a human who typed
+the same title without the 4x3 and got it at once. Aspect ratio, picture
+format, edition and broadcast-standard suffixes are now stripped.
+
+**A numbered sequel was silently identified as the wrong film.**
+ALVIN_AND_THE_CHIPMUNKS_3 is Chipwrecked, which TMDB titles without any digit,
+so the base 2007 film scored highest and at 0.786 against a 0.75 threshold was
+accepted with no question. Only the NAS refusing to overwrite the 2007 film --
+already there from the other disc -- caught it. A trailing number the chosen
+title cannot account for now forces review; a title explains itself either by
+printing the number or by being the Nth film released under that name, so
+picking the right sequel still costs no question. Confirmed by runtime after
+the fact: the disc is 87.2 min, Chipwrecked is 87, the 2007 film is 92.
+
+**A stale identify attempt stamped a finished job.** TMDB found nothing at
+03:40 and the pipeline began menu analysis. The user resolved it by hand; the
+job reached `done` at 03:42. At 03:58 the original attempt emerged from menu
+analysis and ran its needs-review path anyway -- marking a completed job as
+awaiting review, and ejecting a drive that by then could have held a different
+disc. It re-checks the job now, as CLAUDE.md already required of work that
+runs for minutes.
+
+**Correcting a misidentification did not reach the NAS.** Resume saw finalized
+outputs and went straight to the copy, sending the file under its old name;
+only a manual `job rebuild-output` applied the correction. A selection made
+after the finalized manifest was written now resumes at renaming.
+
+Both discs are on the NAS under the right names. 267 backend tests.
 
 ### 2026-08-27 — parallel rips, and three bugs found underneath them
 
