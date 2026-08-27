@@ -276,5 +276,68 @@ class CrossSeasonNamingTests(unittest.TestCase):
         self.assertTrue(all("Season 02" in path for path in written), written)
         self.assertEqual(len(written), 3)
 
+
+class CompilationAlwaysReviewedTests(unittest.TestCase):
+    """
+    Position is evidence on an ordinary disc and noise on a compilation.
+
+    When the name match fails, the planner still assigns whatever is next in
+    the candidate pool. For Mickey Mouse Clubhouse with specials included that
+    pool begins "Mickey's Great Clubhouse Hunt, Mickey's Adventures in
+    Wonderland, The Wizard of Dizz (2)" -- so a Minnie disc would be labelled
+    with three unrelated specials, at whatever confidence the durations
+    happened to earn. Above 0.85 it would have been applied silently.
+    """
+
+    def _map(self, disc_scope: str, confidence: float):
+        import tempfile
+        from autorippr.db import open_db
+        from autorippr.state import create_job
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        conn = open_db(str(Path(tmp.name) / "a.db"))
+        self.addCleanup(conn.close)
+
+        job_id = create_job(conn, disc_label="D", media_type="tv", disc_scope=disc_scope, season_number=1)
+        conn.execute(
+            "INSERT INTO job_selected_media (job_id, media_type, tmdb_id, title, season_number, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (job_id, "tv", 3934, "Show", 1, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO rip_titles (job_id, title_id, duration_seconds, source_file) VALUES (?,?,?,?)",
+            (job_id, 0, 1400.0, "t00.mkv"),
+        )
+        conn.commit()
+
+        planned = [{
+            "rip_title_id": 1, "episode_start": 1, "episode_end": 1,
+            "tmdb_episode_ids": [1001], "episode_titles": ["Something"],
+            "confidence": confidence, "reason": "positional", "needs_split": False,
+        }]
+        episodes = [{"episode_number": 1, "id": 1001, "name": "Something", "season_number": 1}]
+
+        with patch.object(mapper, "_fetch_compilation_episodes", return_value=episodes), patch.object(
+            mapper, "fetch_tmdb_tv_episodes", return_value=episodes
+        ), patch.object(mapper, "_plan_mappings", return_value=planned), patch.object(
+            mapper, "_clear_downstream_state_for_remap"
+        ):
+            return mapper.map_job_episodes(conn, None, job_id)
+
+    def test_a_confident_guess_is_still_confirmed(self) -> None:
+        # 0.95 would have sailed past the 0.85 review threshold.
+        self.assertTrue(self._map("compilation", 0.95)["needs_review"])
+
+    def test_a_low_confidence_one_certainly_is(self) -> None:
+        self.assertTrue(self._map("compilation", 0.40)["needs_review"])
+
+    def test_an_ordinary_disc_still_trusts_a_confident_match(self) -> None:
+        # The rule must not spread to discs where position does mean something.
+        self.assertFalse(self._map("full_season", 0.95)["needs_review"])
+
+    def test_an_ordinary_disc_still_flags_a_weak_match(self) -> None:
+        self.assertTrue(self._map("full_season", 0.40)["needs_review"])
+
 if __name__ == "__main__":
     unittest.main()

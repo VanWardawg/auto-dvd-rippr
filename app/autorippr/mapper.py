@@ -293,6 +293,25 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
         (p["episode_start"] is not None and float(p["confidence"]) < 0.85)
         for p in planned
     )
+    if disc_scope_early == "compilation" and planned:
+        # On an ordinary disc, position is evidence: title 3 is usually episode
+        # 3. On a compilation it is nothing at all -- the episodes were picked
+        # for their subject from anywhere in the show, and the candidate pool
+        # is the whole run. When the name match fails, the planner still falls
+        # back to assigning whatever is next in the pool, which for Mickey
+        # Mouse Clubhouse means the specials, in the order TMDB returned them.
+        # That is a guess that looks exactly like an answer, so these are
+        # always confirmed by hand.
+        needs_review = True
+        append_job_log(
+            conn,
+            job_id,
+            "INFO",
+            "Compilation disc: episode order on the disc carries no meaning, so "
+            "every assignment is offered for confirmation rather than applied.",
+            None,
+            None,
+        )
     append_job_log(
         conn,
         job_id,
