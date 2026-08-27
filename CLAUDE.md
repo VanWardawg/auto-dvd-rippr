@@ -61,10 +61,17 @@ Defined in `state.py` and strictly enforced — `transition_job` raises
 `InvalidTransitionError` on an illegal move.
 
 ```
-queued -> ripping -> identifying -> mapping -> splitting -> renaming -> copying -> done
-                                 \-> renaming (movies skip mapping/splitting)
-any active state -> error -> queued (retry)
+movie:  queued -> ripping -> identifying -> renaming -> copying -> done
+tv:     queued -> identifying -> ripping -> mapping -> splitting -> renaming -> copying -> done
+                                                    \-> renaming (nothing needs splitting)
+any active state -> error -> <the stage it failed in> (retry)
 ```
+
+The two media types leave `queued` in opposite directions, and both edges must
+exist in `ALLOWED_TRANSITIONS`. They did not: `queued -> identifying`,
+`identifying -> ripping` and `ripping -> mapping` were all absent, so every TV
+job died on its first step from the first commit until 2026-08-27. Nothing
+tested the TV path, so nothing said so.
 
 TV and movie jobs take different paths: **TV identifies before ripping**
 (so mapping knows the episode list), **movies rip first**.

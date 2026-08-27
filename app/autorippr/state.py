@@ -20,9 +20,20 @@ ALL_STATUSES = (
 )
 
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
-    "queued": {"ripping", "error"},
-    "ripping": {"identifying", "error"},
-    "identifying": {"mapping", "renaming", "error"},
+    # Two paths leave `queued`, because the two media types need different
+    # things. A movie rips first and is identified from what came off the disc.
+    # TV is identified first, so that mapping already knows the episode list
+    # when the rip lands -- pipeline.py has always branched this way and
+    # _advance_after_identify has always sent an unripped TV job to `ripping`,
+    # but neither transition was permitted here, so every TV job died the
+    # moment it started. 185 jobs reached `ripping` from `queued`; not one ever
+    # reached `identifying`.
+    "queued": {"ripping", "identifying", "error"},
+    # A TV job identified before its rip comes back here already knowing what
+    # it holds, so it goes straight to mapping; anything not yet identified
+    # still goes to identifying first.
+    "ripping": {"identifying", "mapping", "error"},
+    "identifying": {"mapping", "renaming", "ripping", "error"},
     "mapping": {"splitting", "renaming", "error"},
     "splitting": {"renaming", "error"},
     "renaming": {"copying", "error"},
