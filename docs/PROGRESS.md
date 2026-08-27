@@ -52,6 +52,11 @@ target the waiting, not the compute.
 
 ## Next up (found by running the app on real discs)
 
+- **Show rip throughput, and warn when it is pathological.** A disc reading at
+  1x logs no errors and never stalls, so every current health check passes
+  while a 75-minute film takes 84 minutes. Measured 4.8x vs 1.05x on two
+  drives of the same machine, same night, near-identical discs.
+
 - **Strip disc-junk tokens from labels.** `PRINCESS_BRIDE_CE`, `EVERAFTER169`
   (16:9), `PAW_PATROL_NA`, `THESECRETLIFEOFWALTERMITTY` (no spaces).
 - **Batch review queue** so several discs can be cleared in one sitting.
@@ -62,6 +67,55 @@ target the waiting, not the compute.
   `clear_job_local_artifacts` and `clear_job_output_artifacts` leave the
   `job_progress` row behind, so the UI can briefly show stale rip progress.
   Cosmetic.
+
+### 2026-08-27 — parallel rips, and three bugs found underneath them
+
+Ran two rips at once deliberately, to settle whether MakeMKV contends across
+drives. It does not. E: ripped an 81-minute feature in 13.6 min at 4.8x while
+F: ripped throughout — squarely inside the 11–18 min solo baseline measured
+over 152 completed movie jobs. F: was slower, but got *slower still* after E:
+finished, which rules out contention from both directions.
+
+Worth knowing for future measurements: none of the 157 completed rips in the
+database had ever overlapped, so there was no historical baseline to compare
+against. Every earlier parallel attempt had been cancelled or deleted.
+
+Three real bugs surfaced while watching.
+
+**A crashed pipeline left a zombie job.** F:'s backend process died six
+seconds after E: began its finalize and NAS-copy burst. `sqlite3.Operational-
+Error` is not one of the domain exceptions the pipeline catches, so it escaped
+both handlers and killed the process with the job still marked `ripping`.
+MakeMKV survived its parent and kept ripping with nobody reading it; the job
+was not resumable, because Resume only applies to errored jobs; and stderr went
+to `Stdio::null()`, so the traceback was lost. All three are fixed: unexpected
+exceptions mark the job errored, the detached backend logs to
+`backend-errors.log`, and recording the error is best-effort so a broken
+database cannot mask the original exception.
+
+**A dead writer read as perfectly healthy.** The stall check compared the
+progress row against itself — `updated_at` against `last_advance_at` — and both
+freeze at the same instant when the process writing them dies. The difference
+stays zero forever. There is now a wall-clock check, and an abandoned rip says
+something different from a stalled one, because the remedies differ.
+
+**MakeMKV exits 0 when it saves nothing.** A damaged disc logged "Encountered
+11 errors of type 'Read Error'", "0 titles saved, 1 failed", and `EXIT_CODE: 0`.
+The caller saw success, found no files, and reported "rip completed but no MKV
+files were found". This had silently disabled the alternate-title retry added
+the day before, which keys off a failed rip and so could never have fired on
+the discs it exists for. A rip that produces no new MKV is now a failure
+whatever the exit code says.
+
+The failure description was no better: its unreadable-sector branch required
+the words "hash check", so a log with eleven documented read errors fell
+through to "failed with non-zero exit code" — useless, and untrue.
+
+**Throughput is a better health signal than error count.** F:'s disc logged
+zero errors and never stalled, yet read at 1–2x against E:'s 4.8x on the same
+machine — the signature of silent hardware retries on marginal media. Nothing
+in the app can currently see that. Worth surfacing MB/s in the progress row
+and warning below roughly 2x sustained.
 
 ### 2026-08-26 — worn discs
 
