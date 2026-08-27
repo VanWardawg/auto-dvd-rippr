@@ -198,6 +198,7 @@ export interface StartJobRequest {
   mediaType: "tv" | "movie";
   movieMode?: "single" | "double_feature" | "trilogy";
   discScope?: "full_season" | "partial_season" | "special" | "custom";
+  tmdbShowId?: number | null;
   seasonNumber?: number | null;
   episodeRangeStart?: number | null;
   episodeRangeEnd?: number | null;
@@ -235,4 +236,29 @@ export interface RuntimeConfigState {
     ffprobe: RuntimeDependencyStatus;
   };
   makemkvStatus: RuntimeMakeMkvStatus;
+}
+
+/** A show the user can pick before ripping, from a TMDB name search. */
+export interface TvShowResult {
+  tmdb_id: number;
+  name: string;
+  year: number | null;
+  overview: string;
+}
+
+export interface TvSeasonSummary {
+  season_number: number;
+  episode_count: number;
+  name: string;
+  is_specials: boolean;
+  /** Which episodes this disc probably holds, when the label named the disc. */
+  suggested_range: { start: number; end: number } | null;
+}
+
+export interface TvShowDetail {
+  tmdb_id: number;
+  name: string;
+  year: number | null;
+  total_episodes: number;
+  seasons: TvSeasonSummary[];
 }

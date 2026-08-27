@@ -22,7 +22,16 @@ from autorippr.state import (
     update_job_disc_profile,
 )
 from autorippr.rip import RipError, discover_optical_drives, execute_rip_job, get_makemkv_status
-from autorippr.tmdb import TmdbError, fetch_tmdb_tv_episodes, identify_job_with_tmdb, search_job_with_tmdb_query, select_tmdb_candidate
+from autorippr.tmdb import (
+    TmdbError,
+    fetch_tmdb_tv_episodes,
+    fetch_tv_show_seasons,
+    identify_job_with_tmdb,
+    search_job_with_tmdb_query,
+    search_tv_shows,
+    select_tmdb_candidate,
+    suggest_episode_range,
+)
 from autorippr.mapper import (
     MappingError,
     analyze_dvd_menu,
@@ -597,6 +606,20 @@ def build_parser() -> argparse.ArgumentParser:
     tmdb_search.add_argument("query")
     tmdb_search.set_defaults(_cmd="tmdb_search")
 
+    tmdb_show_search = tmdb_sub.add_parser(
+        "show-search", help="Search TMDB for TV shows by name (no job required)"
+    )
+    tmdb_show_search.add_argument("query")
+    tmdb_show_search.set_defaults(_cmd="tmdb_show_search")
+
+    tmdb_show_seasons = tmdb_sub.add_parser(
+        "show-seasons", help="List a show's seasons and episode counts"
+    )
+    tmdb_show_seasons.add_argument("tmdb_id", type=int)
+    tmdb_show_seasons.add_argument("--disc-number", type=int, default=None)
+    tmdb_show_seasons.add_argument("--discs-in-set", type=int, default=None)
+    tmdb_show_seasons.set_defaults(_cmd="tmdb_show_seasons")
+
     tmdb_select = tmdb_sub.add_parser("select", help="Manually select TMDB candidate")
     tmdb_select.add_argument("job_id")
     tmdb_select.add_argument("media_type", choices=["tv", "movie"])
@@ -1032,6 +1055,36 @@ def main() -> int:
                 print(f"TMDB error: {exc}", file=sys.stderr)
                 return 6
             print(json.dumps(result, indent=2))
+            return 0
+
+        if args.tmdb_command == "show-search":
+            try:
+                results = search_tv_shows(conn, cfg, args.query)
+            except TmdbError as exc:
+                print(f"TMDB error: {exc}", file=sys.stderr)
+                return 6
+            print(json.dumps({"query": args.query, "results": results}, indent=2))
+            return 0
+
+        if args.tmdb_command == "show-seasons":
+            try:
+                detail = fetch_tv_show_seasons(conn, cfg, args.tmdb_id)
+            except TmdbError as exc:
+                print(f"TMDB error: {exc}", file=sys.stderr)
+                return 6
+            # Attach a suggested range per season when the label told us which
+            # disc of the set this is, so the UI can prefill it.
+            for season in detail["seasons"]:
+                # Specials are a grab-bag, not a run of episodes split across a
+                # boxed set, so "disc 3 of 4" says nothing about which of them
+                # are here.
+                suggested = None if season["is_specials"] else suggest_episode_range(
+                    season["episode_count"], args.disc_number, args.discs_in_set
+                )
+                season["suggested_range"] = (
+                    {"start": suggested[0], "end": suggested[1]} if suggested else None
+                )
+            print(json.dumps(detail, indent=2))
             return 0
 
         if args.tmdb_command == "identify":

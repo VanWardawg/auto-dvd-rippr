@@ -414,3 +414,71 @@ export function deserializeDriveCards(raw: string | null): DriveCardState[] {
   }
   return cards.length ? cards : [buildDriveCardState()];
 }
+
+/**
+ * Turn a disc's volume label into something worth searching TMDB for.
+ *
+ * Mirrors the backend's cleaning so the lookup box is prefilled with the same
+ * query the pipeline would use. A label carries the pressing's concerns --
+ * aspect ratio, edition, which disc of the set -- and none of those belong in
+ * a search for the show's name.
+ */
+export function showQueryFromLabel(label: string | null | undefined): string {
+  if (!label) return "";
+  return label
+    .toLowerCase()
+    .replace(/[_\-.]+/g, " ")
+    .replace(/\b(disc|disk|dvd|vol|volume|season|ep|episode)\b/g, " ")
+    .replace(/\bs\d{1,2}\s?e\d{1,3}\b/g, " ")
+    .replace(/\b[sd]\s?\d{1,2}\b/g, " ")
+    .replace(/\b(4\s?x\s?3|16\s?x\s?9|ws|fs|ntsc|pal|se|ce|dts|ac3|thx)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Season number named by the label, if it names one. */
+export function seasonFromLabel(label: string | null | undefined): number | null {
+  if (!label) return null;
+  const flat = label.replace(/[_\-.]+/g, " ");
+  const match =
+    /\bseason\s*(\d{1,2})\b/i.exec(flat) ??
+    /\bs(\d{1,2})\s?e\d{1,3}\b/i.exec(flat) ??
+    /\bs\s?(\d{1,2})\b/i.exec(flat);
+  return match ? Number(match[1]) : null;
+}
+
+/** Which disc of a boxed set the label says this is. */
+export function discNumberFromLabel(label: string | null | undefined): number | null {
+  if (!label) return null;
+  const flat = label.replace(/[_\-.]+/g, " ");
+  const match = /\bdis[ck]\s*(\d{1,2})\b/i.exec(flat) ?? /\bd\s?(\d{1,2})\b/i.exec(flat);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * Which episodes disc N of a boxed set probably holds.
+ *
+ * Mirrors `suggest_episode_range` in tmdb.py so the card can prefill without a
+ * round-trip. Studios cut a season evenly across its discs, with the remainder
+ * falling to the earlier ones. Returns null rather than a guess when the
+ * inputs cannot support one -- a wrong prefill is worse than an empty box.
+ */
+export function suggestEpisodeRange(
+  episodeCount: number,
+  discNumber: number | null | undefined,
+  discsInSet: number | null | undefined,
+): { start: number; end: number } | null {
+  if (!episodeCount || !discNumber || !discsInSet) return null;
+  if (discNumber < 1 || discsInSet < 1 || discNumber > discsInSet) return null;
+
+  const perDisc = Math.floor(episodeCount / discsInSet);
+  const remainder = episodeCount % discsInSet;
+  if (perDisc < 1) return null;
+
+  let start = 1;
+  for (let index = 1; index < discNumber; index += 1) {
+    start += perDisc + (index <= remainder ? 1 : 0);
+  }
+  const end = start + perDisc + (discNumber <= remainder ? 1 : 0) - 1;
+  return { start, end: Math.min(end, episodeCount) };
+}

@@ -124,6 +124,8 @@ fn main() {
             rerun_mapping,
             rerun_identify,
             search_tmdb_candidates,
+            search_tv_shows,
+            get_tv_show_seasons,
             select_tmdb_candidate,
             override_mapping,
             override_mapping_source,
@@ -313,6 +315,38 @@ fn rerun_identify(job_id: String) -> Result<(), String> {
 fn search_tmdb_candidates(job_id: String, query: String) -> Result<(), String> {
     let _ = run_python_text(&["tmdb", "search", &job_id, &query])?;
     Ok(())
+}
+
+/// Search TMDB for a show without a job existing yet.
+///
+/// A disc label is frequently not the show's name -- MINNIES_PET_SALON is a
+/// themed compilation of Mickey Mouse Clubhouse episodes, and TMDB has no such
+/// series -- so the user has to be able to look the real show up before the
+/// rip starts, not after it has already gone wrong.
+#[tauri::command]
+fn search_tv_shows(query: String) -> Result<Value, String> {
+    run_python_json(&["tmdb", "show-search", &query])
+}
+
+/// A show's seasons with episode counts, and a suggested range for this disc.
+#[tauri::command]
+fn get_tv_show_seasons(
+    tmdb_id: i64,
+    disc_number: Option<i64>,
+    discs_in_set: Option<i64>,
+) -> Result<Value, String> {
+    let id = tmdb_id.to_string();
+    let mut args = vec!["tmdb".to_string(), "show-seasons".to_string(), id];
+    if let Some(disc) = disc_number {
+        args.push("--disc-number".to_string());
+        args.push(disc.to_string());
+    }
+    if let Some(total) = discs_in_set {
+        args.push("--discs-in-set".to_string());
+        args.push(total.to_string());
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_python_json(&refs)
 }
 
 #[tauri::command]

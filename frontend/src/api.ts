@@ -1,5 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { DiscDrive, JobSnapshot, JobSummary, RuntimeConfigState, StartJobRequest } from "./types";
+import type {
+  DiscDrive,
+  JobSnapshot,
+  JobSummary,
+  RuntimeConfigState,
+  StartJobRequest,
+  TvShowDetail,
+  TvShowResult,
+} from "./types";
 
 export async function listJobs(): Promise<JobSummary[]> {
   return invoke<JobSummary[]>("list_jobs");
@@ -59,6 +67,20 @@ export async function rerunIdentify(jobId: string): Promise<void> {
 
 export async function searchTmdbCandidates(jobId: string, query: string): Promise<void> {
   return invoke("search_tmdb_candidates", { jobId, query });
+}
+
+/** Search TMDB for a show by name, before any job exists. */
+export async function searchTvShows(query: string): Promise<{ query: string; results: TvShowResult[] }> {
+  return invoke("search_tv_shows", { query });
+}
+
+/** A show's seasons and episode counts, with a range suggested for this disc. */
+export async function getTvShowSeasons(
+  tmdbId: number,
+  discNumber?: number | null,
+  discsInSet?: number | null,
+): Promise<TvShowDetail> {
+  return invoke("get_tv_show_seasons", { tmdbId, discNumber: discNumber ?? null, discsInSet: discsInSet ?? null });
 }
 
 export async function selectTmdbCandidate(jobId: string, mediaType: "tv" | "movie", tmdbId: number): Promise<void> {

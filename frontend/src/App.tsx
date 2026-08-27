@@ -20,6 +20,8 @@ import {
   remapRemoteOutput,
   rebuildOutput,
   searchTmdbCandidates,
+  searchTvShows,
+  getTvShowSeasons,
   selectMovieSlotCandidate,
   selectTmdbCandidate,
   updateJobProfile,
@@ -35,6 +37,10 @@ import {
 } from "./api";
 import {
   BOOLEAN_CONFIG_KEYS,
+  discNumberFromLabel,
+  seasonFromLabel,
+  showQueryFromLabel,
+  suggestEpisodeRange,
   DRIVE_CARDS_STORAGE_KEY,
   buildDriveCardState,
   deserializeDriveCards,
@@ -68,6 +74,7 @@ import {
   tmdbCandidateDisplay,
 } from "./lib";
 import type { DriveCardState, GuidedReviewRowDraft, GuidedSplitDraft } from "./lib";
+import type { TvShowDetail, TvShowResult } from "./types";
 import type { DiscDrive, EpisodeMapping, JobLog, JobSnapshot, JobStatus, JobSummary, RipTitle, RuntimeConfigState, SelectedMovieSlot, SplitPlan, StartJobRequest, TmdbCandidate } from "./types";
 
 const POLL_MS = 3000;
@@ -79,6 +86,27 @@ type QuickAction = {
   disabled: boolean;
   tone?: "default" | "danger";
 };
+
+
+/**
+ * The show-lookup panel's state for one drive card.
+ *
+ * Deliberately separate from DriveCardState, which is persisted to
+ * localStorage: this is all transient working state for choosing a show, and
+ * none of it should come back when the app reopens weeks later.
+ */
+type ShowLookupState = {
+  query: string;
+  results: TvShowResult[] | null;
+  detail: TvShowDetail | null;
+  discsInSet: number | null;
+  busy: boolean;
+  error: string | null;
+};
+
+function emptyLookup(query: string): ShowLookupState {
+  return { query, results: null, detail: null, discsInSet: null, busy: false, error: null };
+}
 
 export default function App() {
   const [jobs, setJobs] = useState<JobSummary[]>([]);
@@ -92,6 +120,84 @@ export default function App() {
   const [configLoading, setConfigLoading] = useState(true);
   const [configReady, setConfigReady] = useState(false);
   const [discDrives, setDiscDrives] = useState<DiscDrive[]>([]);
+  const [showLookups, setShowLookups] = useState<Record<string, ShowLookupState>>({});
+
+  // Until the user types, the lookup box tracks the disc label -- cleaned the
+  // same way the backend cleans it, so what they see is what will be searched.
+  const lookupFor = (card: DriveCardState): ShowLookupState =>
+    showLookups[card.id] ?? emptyLookup(showQueryFromLabel(card.form.discLabel));
+
+  const patchLookup = (cardId: string, patch: Partial<ShowLookupState>, fallbackQuery = "") => {
+    setShowLookups((previous) => {
+      const base = previous[cardId] ?? emptyLookup(fallbackQuery);
+      return { ...previous, [cardId]: { ...base, ...patch } };
+    });
+  };
+
+  const runShowSearch = async (card: DriveCardState) => {
+    const state = lookupFor(card);
+    const query = state.query.trim();
+    if (!query) return;
+    patchLookup(card.id, { busy: true, error: null, query }, query);
+    try {
+      const found = await searchTvShows(query);
+      patchLookup(
+        card.id,
+        {
+          busy: false,
+          results: found.results,
+          detail: null,
+          error: found.results.length ? null : `No show on TMDB matches "${query}".`,
+        },
+        query,
+      );
+    } catch (error) {
+      patchLookup(card.id, { busy: false, error: String(error) }, query);
+    }
+  };
+
+  const chooseShow = async (card: DriveCardState, show: TvShowResult) => {
+    patchLookup(card.id, { busy: true, error: null, results: null });
+    try {
+      const detail = await getTvShowSeasons(show.tmdb_id);
+      patchLookup(card.id, { busy: false, detail, query: show.name });
+      updateDriveCard(card.id, (value) => ({
+        ...value,
+        form: { ...value.form, tmdbShowId: show.tmdb_id },
+      }));
+      // A label that named its season already answered the next question.
+      const season = seasonFromLabel(card.form.discLabel);
+      if (season !== null && detail.seasons.some((entry) => entry.season_number === season)) {
+        applySeason(card, detail, season, null);
+      }
+    } catch (error) {
+      patchLookup(card.id, { busy: false, error: String(error) });
+    }
+  };
+
+  const applySeason = (
+    card: DriveCardState,
+    detail: TvShowDetail,
+    seasonNumber: number,
+    discsInSet: number | null,
+  ) => {
+    const season = detail.seasons.find((entry) => entry.season_number === seasonNumber);
+    const range = season
+      ? suggestEpisodeRange(season.episode_count, discNumberFromLabel(card.form.discLabel), discsInSet)
+      : null;
+    updateDriveCard(card.id, (value) => ({
+      ...value,
+      form: {
+        ...value.form,
+        seasonNumber,
+        // Only narrow the scope when there is a real range to narrow it to.
+        discScope: range ? "partial_season" : value.form.discScope,
+        episodeRangeStart: range ? range.start : value.form.episodeRangeStart,
+        episodeRangeEnd: range ? range.end : value.form.episodeRangeEnd,
+      },
+    }));
+  };
+
   const [driveCards, setDriveCards] = useState<DriveCardState[]>(() =>
     deserializeDriveCards(window.localStorage.getItem(DRIVE_CARDS_STORAGE_KEY)),
   );
@@ -1150,6 +1256,11 @@ export default function App() {
           </div>
           <div className="drive-cards">
             {driveCards.map((card, index) => {
+              const lookup = lookupFor(card);
+              const labelDisc = discNumberFromLabel(card.form.discLabel);
+              const chosenSeason = lookup.detail?.seasons.find(
+                (entry) => entry.season_number === card.form.seasonNumber,
+              );
               const showDiscScope = card.form.mediaType === "tv";
               const showSeasonNumber = card.form.mediaType === "tv";
               const showEpisodeRange = card.form.mediaType === "tv" && card.form.discScope === "partial_season";
@@ -1258,6 +1369,106 @@ export default function App() {
                         <option value="movie">Movie</option>
                       </select>
                     </label>
+                    {card.form.mediaType === "tv" ? (
+                      <div className="show-lookup">
+                        <label className="show-lookup-query">
+                          <span>Show</span>
+                          <div className="show-lookup-row">
+                            <input
+                              type="text"
+                              value={lookup.query}
+                              placeholder="Search TMDB for the series"
+                              onChange={(e) => patchLookup(card.id, { query: e.target.value }, e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  void runShowSearch(card);
+                                }
+                              }}
+                            />
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              disabled={lookup.busy || !lookup.query.trim()}
+                              onClick={() => void runShowSearch(card)}
+                            >
+                              {lookup.busy ? "Looking up..." : "Look up"}
+                            </button>
+                          </div>
+                        </label>
+
+                        {lookup.error ? <p className="show-lookup-error">{lookup.error}</p> : null}
+
+                        {lookup.results?.length ? (
+                          <ul className="show-lookup-results">
+                            {lookup.results.slice(0, 6).map((show) => (
+                              <li key={show.tmdb_id}>
+                                <button type="button" onClick={() => void chooseShow(card, show)}>
+                                  <span className="show-name">{show.name}</span>
+                                  {show.year ? <span className="show-year">{show.year}</span> : null}
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
+
+                        {lookup.detail ? (
+                          <div className="show-lookup-detail">
+                            <p className="show-lookup-chosen">
+                              <strong>{lookup.detail.name}</strong>
+                              {lookup.detail.year ? ` (${lookup.detail.year})` : ""} &middot;{" "}
+                              {lookup.detail.total_episodes} episodes
+                            </p>
+                            <div className="show-lookup-row">
+                              <label>
+                                <span>Season</span>
+                                <select
+                                  value={card.form.seasonNumber ?? ""}
+                                  onChange={(e) =>
+                                    applySeason(card, lookup.detail!, Number(e.target.value), lookup.discsInSet)
+                                  }
+                                >
+                                  <option value="">Choose...</option>
+                                  {lookup.detail.seasons.map((season) => (
+                                    <option key={season.season_number} value={season.season_number}>
+                                      {season.is_specials ? "Specials" : `Season ${season.season_number}`}
+                                      {` \u2014 ${season.episode_count} episodes`}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label>
+                                <span>Discs in set</span>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  value={lookup.discsInSet ?? ""}
+                                  placeholder="e.g. 4"
+                                  onChange={(e) => {
+                                    const discs = e.target.value ? Number(e.target.value) : null;
+                                    patchLookup(card.id, { discsInSet: discs });
+                                    if (card.form.seasonNumber != null && lookup.detail) {
+                                      applySeason(card, lookup.detail, card.form.seasonNumber, discs);
+                                    }
+                                  }}
+                                />
+                              </label>
+                            </div>
+                            {chosenSeason ? (
+                              <p className="show-lookup-hint">
+                                {chosenSeason.is_specials
+                                  ? `${chosenSeason.episode_count} specials. These are a grab-bag rather than a run, so pick the episodes by hand.`
+                                  : labelDisc && lookup.discsInSet
+                                    ? `Disc ${labelDisc} of ${lookup.discsInSet} \u2014 episodes ${card.form.episodeRangeStart ?? "?"}\u2013${card.form.episodeRangeEnd ?? "?"} of ${chosenSeason.episode_count}.`
+                                    : labelDisc
+                                      ? `The label says disc ${labelDisc}. Say how many discs the set has and the episode range fills itself in.`
+                                      : `${chosenSeason.episode_count} episodes. Choose a scope below.`}
+                              </p>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                     {showDiscScope ? (
                       <label>
                         <span>Disc scope</span>

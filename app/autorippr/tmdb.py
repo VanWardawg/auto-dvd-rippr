@@ -1297,6 +1297,111 @@ def _tmdb_get(api_key: str, endpoint: str, params: dict[str, Any]) -> dict[str, 
         raise TmdbError("TMDB returned invalid JSON.") from exc
 
 
+
+def search_tv_shows(conn, cfg: AppConfig, query: str) -> list[dict[str, Any]]:
+    """
+    Find shows by name, for choosing one before the disc is ripped.
+
+    A disc label is often not the show's name at all -- MINNIES_PET_SALON is a
+    themed DVD compilation of Mickey Mouse Clubhouse episodes, and TMDB has no
+    such series -- so the user needs to be able to search for the real show
+    themselves rather than being stuck with whatever the pressing was called.
+    """
+    cleaned = (query or "").strip()
+    if not cleaned:
+        return []
+    payload = _cached_tmdb_get(conn, cfg, endpoint="/search/tv", params={"query": cleaned})
+    results = payload.get("results") if isinstance(payload, dict) else []
+    if not isinstance(results, list):
+        return []
+
+    shows: list[dict[str, Any]] = []
+    for item in results:
+        show_id = item.get("id")
+        name = item.get("name")
+        if not isinstance(show_id, int) or not name:
+            continue
+        first_air = str(item.get("first_air_date") or "")
+        shows.append(
+            {
+                "tmdb_id": show_id,
+                "name": str(name),
+                "year": int(first_air[:4]) if first_air[:4].isdigit() else None,
+                "overview": str(item.get("overview") or "")[:300],
+            }
+        )
+    return shows
+
+
+def fetch_tv_show_seasons(conn, cfg: AppConfig, tmdb_show_id: int) -> dict[str, Any]:
+    """
+    A show's seasons and how many episodes each one holds.
+
+    This is the number the user currently has to go and look up on TMDB by
+    hand before they can say whether a disc is a full season or part of one.
+    Specials are reported separately: season 0 holds 47 entries for Mickey
+    Mouse Clubhouse, which is a very different thing from its 26-episode
+    first season and should not be presented as just another season.
+    """
+    payload = _cached_tmdb_get(conn, cfg, endpoint=f"/tv/{tmdb_show_id}", params={})
+    if not isinstance(payload, dict):
+        raise TmdbError(f"TMDB returned no detail for show {tmdb_show_id}.")
+
+    seasons: list[dict[str, Any]] = []
+    for season in payload.get("seasons") or []:
+        number = season.get("season_number")
+        count = season.get("episode_count")
+        if not isinstance(number, int):
+            continue
+        seasons.append(
+            {
+                "season_number": number,
+                "episode_count": int(count) if isinstance(count, int) else 0,
+                "name": str(season.get("name") or f"Season {number}"),
+                "is_specials": number == 0,
+            }
+        )
+    seasons.sort(key=lambda s: s["season_number"])
+
+    first_air = str(payload.get("first_air_date") or "")
+    return {
+        "tmdb_id": tmdb_show_id,
+        "name": str(payload.get("name") or ""),
+        "year": int(first_air[:4]) if first_air[:4].isdigit() else None,
+        "total_episodes": int(payload.get("number_of_episodes") or 0),
+        "seasons": seasons,
+    }
+
+
+def suggest_episode_range(episode_count: int, disc_number: int | None, discs_in_set: int | None) -> tuple[int, int] | None:
+    """
+    Which episodes disc N of a set probably holds.
+
+    Studios split a season evenly across a set far more often than not, so
+    with the disc number off the label -- SHOW_S2_D3 -- and how many discs the
+    set has, the range follows. Saves the user working it out by hand, which
+    is what they do today; they can still override it.
+
+    Returns None rather than a guess when the inputs cannot support one.
+    """
+    if not episode_count or not disc_number or not discs_in_set:
+        return None
+    if disc_number < 1 or discs_in_set < 1 or disc_number > discs_in_set:
+        return None
+
+    per_disc = episode_count // discs_in_set
+    remainder = episode_count % discs_in_set
+    if per_disc < 1:
+        return None
+
+    # Earlier discs absorb the remainder, which is how sets are usually cut.
+    start = 1
+    for index in range(1, disc_number):
+        start += per_disc + (1 if index <= remainder else 0)
+    end = start + per_disc + (1 if disc_number <= remainder else 0) - 1
+    return (start, min(end, episode_count))
+
+
 def _dedupe_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[tuple[int, str]] = set()
     deduped: list[dict[str, Any]] = []

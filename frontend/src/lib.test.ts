@@ -30,6 +30,10 @@ import {
   movieSlotCount,
   normalizeStartRequest,
   parseTitles,
+  showQueryFromLabel,
+  suggestEpisodeRange,
+  seasonFromLabel,
+  discNumberFromLabel,
 } from "./lib";
 import type { EpisodeMapping, JobLog, StartJobRequest } from "./types";
 
@@ -313,5 +317,88 @@ describe("drive card persistence", () => {
     const restored = deserializeDriveCards(JSON.stringify([{ form: { opticalDrive: "F:" } }]));
     expect(typeof restored[0].id).toBe("string");
     expect(restored[0].id.length).toBeGreaterThan(0);
+  });
+});
+
+describe("disc label parsing", () => {
+  it("drops season and disc markers from the search query", () => {
+    // THE_WINGFEATHER_SAGA_S1 was searched verbatim and matched nothing.
+    expect(showQueryFromLabel("THE_WINGFEATHER_SAGA_S1")).toBe("the wingfeather saga");
+    expect(showQueryFromLabel("MICKEY_MOUSE_CLUBHOUSE_S2_D3")).toBe("mickey mouse clubhouse");
+  });
+
+  it("drops the pressing's own jargon", () => {
+    expect(showQueryFromLabel("ALVIN_AND_THE_CHIPMUNKS_4X3")).toBe("alvin and the chipmunks");
+    expect(showQueryFromLabel("PRINCESS_BRIDE_CE")).toBe("princess bride");
+  });
+
+  it("leaves a compilation title alone", () => {
+    // MINNIES_PET_SALON is the name of a DVD, not of a show -- but mangling it
+    // would only make the user's manual search harder.
+    expect(showQueryFromLabel("MINNIES_PET_SALON")).toBe("minnies pet salon");
+    expect(showQueryFromLabel("I_HEART_MINNIE")).toBe("i heart minnie");
+  });
+
+  it("reads the season through an underscore", () => {
+    // An underscore is a word character, which is what broke this in Python.
+    expect(seasonFromLabel("THE_WINGFEATHER_SAGA_S1")).toBe(1);
+    expect(seasonFromLabel("PAW_PATROL_SEASON_3_DISC_2")).toBe(3);
+    expect(seasonFromLabel("SOME_SHOW_S02E05")).toBe(2);
+  });
+
+  it("reads which disc of the set it is", () => {
+    expect(discNumberFromLabel("TUTTLE_TWINS_S1_D2")).toBe(2);
+    expect(discNumberFromLabel("PAW_PATROL_SEASON_3_DISC_2")).toBe(2);
+  });
+
+  it("claims nothing for a label that says nothing", () => {
+    expect(seasonFromLabel("MINNIES_PET_SALON")).toBeNull();
+    expect(discNumberFromLabel("MINNIES_PET_SALON")).toBeNull();
+    expect(showQueryFromLabel(null)).toBe("");
+    expect(seasonFromLabel(undefined)).toBeNull();
+  });
+
+  it("agrees with the backend on the discs it will actually meet", () => {
+    // These are the labels sitting on the shelf right now.
+    expect(showQueryFromLabel("TUTTLE_TWINS_S1_D1")).toBe("tuttle twins");
+    expect(showQueryFromLabel("TUTTLE_TWINS_S1_D2")).toBe("tuttle twins");
+  });
+});
+
+describe("suggestEpisodeRange", () => {
+  it("splits a season across its discs", () => {
+    expect(suggestEpisodeRange(24, 1, 4)).toEqual({ start: 1, end: 6 });
+    expect(suggestEpisodeRange(24, 4, 4)).toEqual({ start: 19, end: 24 });
+  });
+
+  it("gives the remainder to the earlier discs", () => {
+    // Mickey Mouse Clubhouse season 2: 39 over 4 discs is 10/10/10/9.
+    expect([1, 2, 3, 4].map((n) => suggestEpisodeRange(39, n, 4))).toEqual([
+      { start: 1, end: 10 },
+      { start: 11, end: 20 },
+      { start: 21, end: 30 },
+      { start: 31, end: 39 },
+    ]);
+  });
+
+  it("tiles the season exactly, dropping and repeating nothing", () => {
+    for (const [count, discs] of [[26, 3], [39, 4], [32, 5], [13, 2]] as const) {
+      const covered: number[] = [];
+      for (let n = 1; n <= discs; n += 1) {
+        const range = suggestEpisodeRange(count, n, discs)!;
+        for (let e = range.start; e <= range.end; e += 1) covered.push(e);
+      }
+      expect(covered, `${count} eps over ${discs} discs`).toEqual(
+        Array.from({ length: count }, (_, i) => i + 1),
+      );
+    }
+  });
+
+  it("agrees with the backend it mirrors", () => {
+    // Same cases asserted in app/tests/test_disc_labels.py.
+    expect(suggestEpisodeRange(26, 1, 1)).toEqual({ start: 1, end: 26 });
+    expect(suggestEpisodeRange(26, null, 4)).toBeNull();
+    expect(suggestEpisodeRange(26, 5, 4)).toBeNull();
+    expect(suggestEpisodeRange(3, 1, 8)).toBeNull();
   });
 });

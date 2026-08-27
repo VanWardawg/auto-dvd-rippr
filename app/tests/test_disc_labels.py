@@ -32,6 +32,7 @@ from autorippr.tmdb import (  # noqa: E402
     _franchise_position,
     _normalize_identify_query,
     parse_disc_hints,
+    suggest_episode_range,
     _normalize_query,
     _sequel_number_unexplained,
 )
@@ -195,6 +196,49 @@ class TvLabelTests(unittest.TestCase):
     def test_a_compilation_title_is_left_intact(self) -> None:
         self.assertEqual(tv_query("MINNIES_PET_SALON"), "minnies pet salon")
         self.assertEqual(tv_query("I_HEART_MINNIE"), "i heart minnie")
+
+
+class EpisodeRangeSuggestionTests(unittest.TestCase):
+    """
+    Working out which episodes are on disc 3 of 4 is a step the user currently
+    does by hand, on TMDB, before they can start the job.
+    """
+
+    def test_a_season_splits_evenly_across_its_discs(self) -> None:
+        self.assertEqual(suggest_episode_range(24, 1, 4), (1, 6))
+        self.assertEqual(suggest_episode_range(24, 4, 4), (19, 24))
+
+    def test_the_remainder_goes_to_the_earlier_discs(self) -> None:
+        # Mickey Mouse Clubhouse season 2: 39 episodes over 4 discs is
+        # 10/10/10/9, which is how sets are actually cut.
+        ranges = [suggest_episode_range(39, n, 4) for n in (1, 2, 3, 4)]
+        self.assertEqual(ranges, [(1, 10), (11, 20), (21, 30), (31, 39)])
+
+    def test_the_ranges_tile_the_season_exactly(self) -> None:
+        # No episode may be dropped between discs or claimed by two of them.
+        for count, discs in ((26, 3), (39, 4), (32, 5), (13, 2)):
+            covered: list[int] = []
+            for n in range(1, discs + 1):
+                start, end = suggest_episode_range(count, n, discs)
+                covered.extend(range(start, end + 1))
+            self.assertEqual(covered, list(range(1, count + 1)), f"{count} eps over {discs} discs")
+
+    def test_a_single_disc_season_is_the_whole_season(self) -> None:
+        self.assertEqual(suggest_episode_range(26, 1, 1), (1, 26))
+
+    def test_it_declines_rather_than_guessing(self) -> None:
+        # Without the disc number there is nothing to base a range on, and a
+        # wrong prefill is worse than an empty box the user fills in.
+        self.assertIsNone(suggest_episode_range(26, None, 4))
+        self.assertIsNone(suggest_episode_range(26, 2, None))
+        self.assertIsNone(suggest_episode_range(0, 1, 4))
+
+    def test_a_disc_outside_the_set_is_refused(self) -> None:
+        self.assertIsNone(suggest_episode_range(26, 5, 4))
+        self.assertIsNone(suggest_episode_range(26, 0, 4))
+
+    def test_more_discs_than_episodes_is_refused(self) -> None:
+        self.assertIsNone(suggest_episode_range(3, 1, 8))
 
 if __name__ == "__main__":
     unittest.main()

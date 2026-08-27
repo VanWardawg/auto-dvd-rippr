@@ -1572,3 +1572,101 @@ input::placeholder {
   background: var(--warn-soft);
   border-color: var(--warn);
 }
+
+/* ---- TV show lookup -------------------------------------------------------
+   Choosing the series before the rip starts. A disc label is written by
+   whoever authored the pressing, so it is often not the show's name at all --
+   this is where the user says what the disc actually holds. */
+
+.show-lookup {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-2);
+}
+
+.show-lookup-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.show-lookup-row > label {
+  flex: 1 1 8rem;
+  min-width: 0;
+}
+
+.show-lookup-query input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.show-lookup-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
+.show-lookup-results button {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.show-lookup-results button:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.show-lookup-results .show-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.show-lookup-results .show-year {
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+
+.show-lookup-chosen {
+  margin: 0;
+  color: var(--text);
+}
+
+.show-lookup-hint {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.show-lookup-error {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--danger);
+}
+
+.show-lookup-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
