@@ -129,5 +129,71 @@ class EpisodeTargetTests(unittest.TestCase):
         self.assertEqual(target.season_number, 1)
 
 
+class PreselectShowTests(unittest.TestCase):
+    """
+    A show chosen in the disc card is an answer already given.
+
+    Without carrying it to the job, a compilation disc would rip, fail to
+    identify -- TMDB has no series called "Minnie's Pet Salon" -- and stop to
+    ask the user the very question they answered before starting.
+    """
+
+    def _job(self, conn):
+        from autorippr.state import create_job
+
+        return create_job(conn, disc_label="MINNIES_PET_SALON", media_type="tv", disc_scope="compilation")
+
+    def _preselect(self, conn, job_id):
+        from autorippr import tmdb
+
+        detail = {"tmdb_id": 3934, "name": "Mickey Mouse Clubhouse", "year": 2006, "seasons": []}
+        with patch.object(tmdb, "fetch_tv_show_seasons", return_value=detail):
+            return tmdb.preselect_tv_show(conn, None, job_id, 3934)
+
+    def _conn(self):
+        import tempfile
+        from autorippr.db import open_db
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        conn = open_db(str(Path(tmp.name) / "a.db"))
+        self.addCleanup(conn.close)
+        return conn
+
+    def test_the_show_is_recorded_as_the_selection(self) -> None:
+        conn = self._conn()
+        job_id = self._job(conn)
+        self._preselect(conn, job_id)
+        selected = conn.execute(
+            "SELECT media_type, tmdb_id, title FROM job_selected_media WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        self.assertEqual(selected["tmdb_id"], 3934)
+        self.assertEqual(selected["media_type"], "tv")
+        self.assertEqual(selected["title"], "Mickey Mouse Clubhouse")
+
+    def test_it_counts_as_a_manual_choice(self) -> None:
+        # The pipeline recognises manual_override as "identification is
+        # settled"; anything less and it would ask again after the rip.
+        conn = self._conn()
+        job_id = self._job(conn)
+        self._preselect(conn, job_id)
+        row = conn.execute(
+            "SELECT selected, manual_override FROM tmdb_candidates WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        self.assertEqual((row["selected"], row["manual_override"]), (1, 1))
+
+    def test_a_label_that_matches_no_show_is_no_obstacle(self) -> None:
+        # The entire point: MINNIES_PET_SALON returns nothing from TMDB, and
+        # the job is identified anyway because the user said what it is.
+        conn = self._conn()
+        job_id = self._job(conn)
+        self._preselect(conn, job_id)
+        job = conn.execute("SELECT disc_label FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        self.assertEqual(job["disc_label"], "MINNIES_PET_SALON")
+        self.assertIsNotNone(
+            conn.execute("SELECT 1 FROM job_selected_media WHERE job_id = ?", (job_id,)).fetchone()
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

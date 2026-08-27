@@ -1402,6 +1402,43 @@ def suggest_episode_range(episode_count: int, disc_number: int | None, discs_in_
     return (start, min(end, episode_count))
 
 
+
+def preselect_tv_show(conn, cfg: AppConfig, job_id: str, tmdb_show_id: int) -> dict[str, Any]:
+    """
+    Record a show the user picked in the disc card, before anything is ripped.
+
+    Identification normally works from the disc label, which for a compilation
+    is a dead end: TMDB has no series called "Minnie's Pet Salon", so the job
+    would rip, find nothing, and stop for a human -- having asked the same
+    question the user already answered when they chose the show.
+
+    Written as a manual selection because that is exactly what it is, and
+    because it is the form the pipeline already recognises as "identification
+    is settled, move on".
+    """
+    detail = fetch_tv_show_seasons(conn, cfg, tmdb_show_id)
+    title = detail.get("name") or f"Show {tmdb_show_id}"
+
+    conn.execute(
+        """
+        INSERT INTO tmdb_candidates (
+            job_id, tmdb_id, media_type, title, year, score, score_breakdown_json,
+            selected, manual_override
+        )
+        VALUES (?, ?, 'tv', ?, ?, 1.0, ?, 0, 0)
+        """,
+        (
+            job_id,
+            int(tmdb_show_id),
+            str(title),
+            detail.get("year"),
+            json.dumps({"reason": "chosen in the disc card before ripping"}, ensure_ascii=True),
+        ),
+    )
+    conn.commit()
+    return select_tmdb_candidate(conn, job_id, int(tmdb_show_id), "tv")
+
+
 def _dedupe_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[tuple[int, str]] = set()
     deduped: list[dict[str, Any]] = []

@@ -19,6 +19,7 @@ struct StartJobRequest {
     media_type: String,
     movie_mode: Option<String>,
     disc_scope: Option<String>,
+    tmdb_show_id: Option<i64>,
     include_specials: Option<bool>,
     season_number: Option<i64>,
     episode_range_start: Option<i64>,
@@ -254,6 +255,10 @@ fn start_pipeline(request: StartJobRequest) -> Result<String, String> {
     }
     // Only meaningful for a compilation disc, and the CLI treats its absence
     // as "no", so there is nothing to push when it is false.
+    if let Some(show_id) = request.tmdb_show_id {
+        create_args.push("--tmdb-show-id".into());
+        create_args.push(show_id.to_string());
+    }
     if request.include_specials.unwrap_or(false) {
         create_args.push("--include-specials".into());
     }

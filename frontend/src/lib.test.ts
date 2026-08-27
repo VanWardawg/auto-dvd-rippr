@@ -449,3 +449,26 @@ describe("compilation discs", () => {
     expect(out.includeSpecials ?? null).toBeNull();
   });
 });
+
+describe("the chosen show reaches the job", () => {
+  // Picking a show in the card only helps if it survives normalisation; it
+  // was being silently dropped, which left compilation discs unidentifiable.
+  const base: StartJobRequest = { discLabel: "D", mediaType: "tv", tmdbShowId: 3934 };
+
+  it("survives on a compilation disc", () => {
+    expect(normalizeStartRequest({ ...base, discScope: "compilation" }).tmdbShowId).toBe(3934);
+  });
+
+  it("survives on a partial season", () => {
+    expect(normalizeStartRequest({ ...base, discScope: "partial_season" }).tmdbShowId).toBe(3934);
+  });
+
+  it("survives on a full season", () => {
+    expect(normalizeStartRequest({ ...base, discScope: "full_season" }).tmdbShowId).toBe(3934);
+  });
+
+  it("is absent when no show was chosen", () => {
+    const out = normalizeStartRequest({ discLabel: "D", mediaType: "tv", discScope: "full_season" });
+    expect(out.tmdbShowId ?? null).toBeNull();
+  });
+});

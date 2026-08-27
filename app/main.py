@@ -28,6 +28,7 @@ from autorippr.tmdb import (
     fetch_tv_show_seasons,
     identify_job_with_tmdb,
     search_job_with_tmdb_query,
+    preselect_tv_show,
     search_tv_shows,
     select_tmdb_candidate,
     suggest_episode_range,
@@ -524,6 +525,12 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--movie-mode", default="single", choices=["single", "double_feature", "trilogy"])
     create.add_argument("--disc-scope", default=None, choices=["full_season", "partial_season", "special", "custom", "compilation"])
     create.add_argument(
+        "--tmdb-show-id",
+        type=int,
+        default=None,
+        help="Pre-select the TV show chosen in the disc card, skipping identification",
+    )
+    create.add_argument(
         "--include-specials",
         action="store_true",
         help="For a compilation disc, also match against the show's specials",
@@ -722,6 +729,14 @@ def main() -> int:
                 episode_range_start=args.episode_range_start,
                 episode_range_end=args.episode_range_end,
             )
+            # A show chosen in the card is an answer already given; asking for
+            # it again after the rip is the delay this avoids.
+            show_id = getattr(args, "tmdb_show_id", None)
+            if show_id:
+                try:
+                    preselect_tv_show(conn, cfg, job_id, int(show_id))
+                except TmdbError as exc:
+                    print(f"Warning: could not pre-select show {show_id}: {exc}", file=sys.stderr)
             print(job_id)
             return 0
 

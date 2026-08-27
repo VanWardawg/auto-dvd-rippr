@@ -259,6 +259,7 @@ export function normalizeStartRequest(form: StartJobRequest): StartJobRequest {
       mediaType: form.mediaType,
       discScope: form.discScope,
       includeSpecials: form.includeSpecials ?? false,
+      tmdbShowId: form.tmdbShowId ?? null,
     };
   }
   if (form.discScope === "partial_season") {
@@ -270,6 +271,7 @@ export function normalizeStartRequest(form: StartJobRequest): StartJobRequest {
       seasonNumber: form.seasonNumber ?? null,
       episodeRangeStart: form.episodeRangeStart ?? null,
       episodeRangeEnd: form.episodeRangeEnd ?? null,
+      tmdbShowId: form.tmdbShowId ?? null,
     };
   }
   return {
@@ -277,6 +279,7 @@ export function normalizeStartRequest(form: StartJobRequest): StartJobRequest {
     opticalDrive: form.opticalDrive ?? null,
     mediaType: form.mediaType,
     discScope: form.discScope,
+    tmdbShowId: form.tmdbShowId ?? null,
     seasonNumber: form.seasonNumber ?? null,
     episodeRangeStart: null,
     episodeRangeEnd: null,
