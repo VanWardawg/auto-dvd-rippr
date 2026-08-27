@@ -14,7 +14,7 @@ MakeMKV robot output is CSV after a `PREFIX:` marker, with quoted strings:
 """
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import StringIO
 from typing import Any, Iterable
 
@@ -112,6 +112,10 @@ class TitleSelection:
     title_ids: list[int]
     reason: str
     skipped: list[str]
+    # Selected title -> the same-length titles collapsed into it, best first.
+    # A disc often carries two copies of the feature on different sectors, so
+    # when the chosen one hits unreadable media the twin is worth a try.
+    alternates: dict[int, list[int]] = field(default_factory=dict)
 
     @property
     def is_everything(self) -> bool:
@@ -171,15 +175,29 @@ def _select_movie_titles(candidates: list[TitleCandidate], *, movie_mode: str) -
     # Blu-ray playlist obfuscation produces many near-identical long titles.
     # Collapse titles of the same duration to the largest one, which is the
     # complete version rather than a partial angle.
-    by_duration: dict[int, TitleCandidate] = {}
+    #
+    # Size is only a tiebreak between equals, though -- it says nothing about
+    # which copy is physically readable. A worn DVD carrying the feature twice
+    # can have the larger copy land on scratched sectors, so the runners-up are
+    # kept as fallbacks rather than thrown away.
+    by_duration: dict[int, list[TitleCandidate]] = {}
     for candidate in sorted(features, key=lambda c: (-c.size_bytes, c.title_id)):
         # Round to 5s so trivially different variants of one feature collapse.
         key = int(round(candidate.duration_seconds / 5.0))
-        by_duration.setdefault(key, candidate)
+        by_duration.setdefault(key, []).append(candidate)
 
-    deduped = sorted(by_duration.values(), key=lambda c: (-c.duration_seconds, c.title_id))
+    deduped = sorted(
+        (group[0] for group in by_duration.values()),
+        key=lambda c: (-c.duration_seconds, c.title_id),
+    )
     selected = sorted(deduped[:wanted], key=lambda c: c.title_id)
     selected_ids = {c.title_id for c in selected}
+
+    alternates = {
+        group[0].title_id: [c.title_id for c in group[1:]]
+        for group in by_duration.values()
+        if group[0].title_id in selected_ids and len(group) > 1
+    }
 
     skipped = [
         f"title {c.title_id} ({c.duration_minutes:.0f} min, {c.name})"
@@ -194,6 +212,7 @@ def _select_movie_titles(candidates: list[TitleCandidate], *, movie_mode: str) -
         )
     return TitleSelection(
         title_ids=[c.title_id for c in selected],
+        alternates=alternates,
         reason=(
             f"Selected {len(selected)} feature title(s) of {len(candidates)}; "
             f"longest is {longest / 60:.0f} min."

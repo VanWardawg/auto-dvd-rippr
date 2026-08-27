@@ -5,10 +5,12 @@ These guard the decisions that determine how much of a disc gets ripped, which
 is the difference between a 20-minute and a 60-minute disc.
 """
 
+import io
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+import unittest.mock
 from unittest.mock import patch
 
 
@@ -257,3 +259,140 @@ class SpaceGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AlternateTitleTests(unittest.TestCase):
+    """
+    A worn disc that carries the feature twice must not fail on the bad copy.
+
+    Taken from a real PONYO DVD: two 102.5-minute titles, 444 KB apart in size.
+    Selection took the larger one, which sat on scratched sectors, and the job
+    died -- while the copy it discarded ripped perfectly.
+    """
+
+    def _ponyo(self) -> list[TitleCandidate]:
+        return [
+            title(0, 102.5, size_gb=6.3577, name="C1_t00.mkv"),
+            title(1, 102.5, size_gb=6.3581, name="C1_t01.mkv"),
+            title(2, 3.3, name="D1_t02.mkv"),
+            title(3, 5.1, name="A1_t03.mkv"),
+            title(4, 13.7, name="E1_t04.mkv"),
+        ]
+
+    def test_the_discarded_twin_is_kept_as_a_fallback(self) -> None:
+        selection = select_titles(self._ponyo(), media_type="movie")
+        self.assertEqual(selection.title_ids, [1], "still prefers the larger copy")
+        self.assertEqual(selection.alternates, {1: [0]}, "and remembers the one it passed over")
+
+    def test_extras_never_become_fallbacks(self) -> None:
+        # Retrying a 102-minute feature with a 3-minute trailer would produce a
+        # file that looks like a successful rip and is not the movie.
+        selection = select_titles(self._ponyo(), media_type="movie")
+        for fallbacks in selection.alternates.values():
+            for alternate in fallbacks:
+                self.assertGreater(
+                    [c for c in self._ponyo() if c.title_id == alternate][0].duration_minutes,
+                    60,
+                )
+
+    def test_a_disc_with_one_copy_has_no_fallbacks(self) -> None:
+        candidates = [title(0, 100, size_gb=5.0), title(1, 4, size_gb=0.2)]
+        self.assertEqual(select_titles(candidates, media_type="movie").alternates, {})
+
+    def test_fallbacks_are_ordered_largest_first(self) -> None:
+        candidates = [
+            title(0, 100, size_gb=5.0),
+            title(1, 100, size_gb=5.2),
+            title(2, 100, size_gb=5.1),
+        ]
+        selection = select_titles(candidates, media_type="movie")
+        self.assertEqual(selection.title_ids, [1])
+        self.assertEqual(selection.alternates[1], [2, 0])
+
+
+class PartialOutputTests(unittest.TestCase):
+    def test_removes_what_the_failed_attempt_wrote(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / "good.mkv").write_text("keep")
+            (out / "truncated.mkv").write_text("discard")
+            rip._discard_partial_output(out, keep={"good.mkv"})
+            self.assertEqual([p.name for p in out.glob("*.mkv")], ["good.mkv"])
+
+    def test_leaves_titles_ripped_earlier_alone(self) -> None:
+        # A multi-title rip that fails on title 3 must not delete titles 1-2.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            for name in ("t01.mkv", "t02.mkv"):
+                (out / name).write_text("done")
+            rip._discard_partial_output(out, keep={"t01.mkv", "t02.mkv"})
+            self.assertEqual(len(list(out.glob("*.mkv"))), 2)
+
+
+class AlternateRetryTests(unittest.TestCase):
+    """The rip-side half: actually re-running the failed title as its twin."""
+
+    def _retry(self, outcomes: list[int], alternates: list[int], out: Path):
+        attempts: list[list[str]] = []
+
+        def fake_stream(**kwargs):
+            attempts.append(list(kwargs["cmd"]))
+            return outcomes[len(attempts) - 1]
+
+        with patch.object(rip, "_stream_one_makemkv_rip", side_effect=fake_stream), patch.object(
+            rip, "_ensure_job_still_ripping"
+        ), patch.object(rip, "append_job_log"):
+            code = rip._retry_title_with_alternates(
+                conn=unittest.mock.MagicMock(),
+                job_id="job",
+                cmd=["makemkv", "-r", "mkv", "dev:E:", "1", str(out)],
+                log_file=io.StringIO(),
+                output_dir=out,
+                started_at=0.0,
+                timeout_seconds=60,
+                title_index=1,
+                title_count=1,
+                selector="1",
+                alternates=alternates,
+                keep=set(),
+            )
+        return code, attempts
+
+    def test_a_readable_twin_rescues_the_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            code, attempts = self._retry([0], [0], out)
+        self.assertEqual(code, 0)
+        self.assertEqual(attempts[0][-2], "0", "retried against the alternate title")
+
+    def test_the_broken_half_file_is_not_left_behind(self) -> None:
+        # Otherwise the pipeline finds two MKVs and treats the truncated one as
+        # a ripped title.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / "C1_t01.mkv").write_text("truncated")
+            code, _ = self._retry([0], [0], out)
+            self.assertEqual(code, 0)
+            self.assertEqual(list(out.glob("*.mkv")), [])
+
+    def test_every_twin_is_tried_before_giving_up(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            code, attempts = self._retry([1, 0], [2, 0], out)
+        self.assertEqual(code, 0)
+        self.assertEqual([a[-2] for a in attempts], ["2", "0"])
+
+    def test_no_twin_means_no_wasted_second_rip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            code, attempts = self._retry([], [], out)
+        self.assertEqual(code, 1)
+        self.assertEqual(attempts, [], "a disc with one copy must fail immediately")
+
+    def test_a_genuinely_unreadable_disc_still_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            code, attempts = self._retry([1, 1], [2, 0], out)
+        self.assertEqual(code, 1)
+        self.assertEqual(len(attempts), 2)
+

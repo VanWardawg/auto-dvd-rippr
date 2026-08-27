@@ -287,7 +287,7 @@ def execute_rip_job(
             )
         conn.commit()
 
-        selection = _plan_title_selection(conn, cfg, job_id, disc_info_by_title)
+        selection, title_alternates = _plan_title_selection(conn, cfg, job_id, disc_info_by_title)
         _ensure_space_for_rip(conn, cfg, job_id, disc_info_by_title, selection)
 
         _ensure_job_still_ripping(conn, job_id)
@@ -309,6 +309,7 @@ def execute_rip_job(
             source_spec=source_spec,
             timeout_seconds=cfg.rip_timeout_seconds,
             title_ids=selection,
+            title_alternates=title_alternates,
             min_title_seconds=cfg.rip_min_title_seconds,
         )
         log_already_written = True
@@ -478,16 +479,19 @@ def _plan_title_selection(
     cfg: AppConfig,
     job_id: str,
     disc_info_by_title: dict[int, dict[str, Any]],
-) -> list[int] | None:
+) -> tuple[list[int] | None, dict[int, list[int]]]:
     """
     Decide which titles to rip. None means "everything" (the fast path).
+
+    Also returns each selected title's same-length fallbacks, so an unreadable
+    copy of the feature can be retried against its twin.
 
     Ripping every title MakeMKV offers is the single largest avoidable cost in
     a collection migration: trailers, studio logos, language variants and
     "play all" tracks routinely add more data than the content itself.
     """
     if cfg.rip_title_selection == "all":
-        return None
+        return None, {}
     if not disc_info_by_title:
         append_job_log(
             conn=conn,
@@ -498,7 +502,7 @@ def _plan_title_selection(
             to_status=None,
         )
         conn.commit()
-        return None
+        return None, {}
 
     job = get_job(conn, job_id) or {}
     candidates = build_title_candidates(disc_info_by_title)
@@ -530,8 +534,8 @@ def _plan_title_selection(
     conn.commit()
 
     if selection.is_everything or not selection.title_ids:
-        return None
-    return selection.title_ids
+        return None, {}
+    return selection.title_ids, selection.alternates
 
 
 def _disc_scan_timeout_seconds(cfg: AppConfig, optical_drive: str | None) -> int:
@@ -556,6 +560,7 @@ def _run_makemkv_rip_streaming(
     source_spec: str,
     timeout_seconds: int,
     title_ids: list[int] | None = None,
+    title_alternates: dict[int, list[int]] | None = None,
     min_title_seconds: int = 120,
 ) -> tuple[str, int]:
     makemkv = _resolve_makemkv_cli_path(makemkv_path)
@@ -588,6 +593,7 @@ def _run_makemkv_rip_streaming(
             lf.write(f"COMMAND: {' '.join(cmd)}\n\n")
             lf.flush()
 
+            before = {path.name for path in output_dir.glob("*.mkv")}
             exit_code = _stream_one_makemkv_rip(
                 conn=conn,
                 job_id=job_id,
@@ -601,6 +607,22 @@ def _run_makemkv_rip_streaming(
             )
             lf.write(f"\nEXIT_CODE: {exit_code}\n")
             lf.flush()
+
+            if exit_code != 0:
+                exit_code = _retry_title_with_alternates(
+                    conn=conn,
+                    job_id=job_id,
+                    cmd=cmd,
+                    log_file=lf,
+                    output_dir=output_dir,
+                    started_at=start,
+                    timeout_seconds=timeout_seconds,
+                    title_index=index,
+                    title_count=len(selectors),
+                    selector=selector,
+                    alternates=(title_alternates or {}).get(_selector_title_id(selector), []),
+                    keep=before,
+                )
             if exit_code != 0:
                 break
 
@@ -610,6 +632,110 @@ def _run_makemkv_rip_streaming(
     except OSError:
         log_text = ""
     return log_text, exit_code
+
+
+
+def _selector_title_id(selector: str) -> int:
+    try:
+        return int(selector)
+    except (TypeError, ValueError):
+        return -1
+
+
+def _discard_partial_output(output_dir: Path, keep: set[str]) -> None:
+    """
+    Remove whatever the failed attempt left behind.
+
+    A rip that dies on a bad sector still leaves a truncated MKV in the output
+    directory, and the pipeline picks up every MKV it finds there -- so without
+    this the broken half-file would be treated as a ripped title alongside the
+    good retry.
+    """
+    for path in output_dir.glob("*.mkv"):
+        if path.name in keep:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            log.warning("could not remove partial rip output", extra={"path": str(path)})
+
+
+def _retry_title_with_alternates(
+    conn,
+    job_id: str,
+    cmd: list[str],
+    log_file,
+    output_dir: Path,
+    started_at: float,
+    timeout_seconds: int,
+    title_index: int,
+    title_count: int,
+    selector: str,
+    alternates: list[int],
+    keep: set[str],
+) -> int:
+    """
+    Re-run a failed title against the same-length copies it was chosen over.
+
+    Discs frequently carry the feature more than once, and the copies sit on
+    different physical sectors. Selection picks between them on file size,
+    which says nothing about whether the disc is readable there -- so when the
+    chosen copy hits damaged media, its twin is often perfectly intact. Without
+    this the whole job fails on a disc that can in fact be ripped.
+    """
+    if not alternates:
+        return 1
+
+    for alternate in alternates:
+        _ensure_job_still_ripping(conn, job_id)
+        _discard_partial_output(output_dir, keep)
+        append_job_log(
+            conn=conn,
+            job_id=job_id,
+            level="WARNING",
+            message=(
+                f"Title {selector} failed to rip; retrying with same-length title "
+                f"{alternate}. Discs often carry the feature twice, and the other "
+                "copy may sit on undamaged sectors."
+            ),
+            from_status=None,
+            to_status=None,
+        )
+        conn.commit()
+
+        retry_cmd = list(cmd)
+        retry_cmd[-2] = str(alternate)
+        log.info("retrying makemkv with alternate title", extra={"command": " ".join(retry_cmd)})
+        log_file.write(f"\nRETRY COMMAND: {' '.join(retry_cmd)}\n\n")
+        log_file.flush()
+
+        exit_code = _stream_one_makemkv_rip(
+            conn=conn,
+            job_id=job_id,
+            cmd=retry_cmd,
+            log_file=log_file,
+            output_dir=output_dir,
+            started_at=started_at,
+            timeout_seconds=timeout_seconds,
+            title_index=title_index,
+            title_count=title_count,
+        )
+        log_file.write(f"\nEXIT_CODE: {exit_code}\n")
+        log_file.flush()
+        if exit_code == 0:
+            append_job_log(
+                conn=conn,
+                job_id=job_id,
+                level="INFO",
+                message=f"Alternate title {alternate} ripped cleanly.",
+                from_status=None,
+                to_status=None,
+            )
+            conn.commit()
+            return 0
+
+    _discard_partial_output(output_dir, keep)
+    return 1
 
 
 def _stream_one_makemkv_rip(
