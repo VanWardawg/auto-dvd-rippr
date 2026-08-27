@@ -35,6 +35,10 @@ import {
 } from "./api";
 import {
   BOOLEAN_CONFIG_KEYS,
+  DRIVE_CARDS_STORAGE_KEY,
+  buildDriveCardState,
+  deserializeDriveCards,
+  serializeDriveCards,
   MOVIE_PIPELINE_STAGES,
   TV_PIPELINE_STAGES,
   buildConfigDraft,
@@ -63,7 +67,7 @@ import {
   ripTitleDisplay,
   tmdbCandidateDisplay,
 } from "./lib";
-import type { GuidedReviewRowDraft, GuidedSplitDraft } from "./lib";
+import type { DriveCardState, GuidedReviewRowDraft, GuidedSplitDraft } from "./lib";
 import type { DiscDrive, EpisodeMapping, JobLog, JobSnapshot, JobStatus, JobSummary, RipTitle, RuntimeConfigState, SelectedMovieSlot, SplitPlan, StartJobRequest, TmdbCandidate } from "./types";
 
 const POLL_MS = 3000;
@@ -75,39 +79,6 @@ type QuickAction = {
   disabled: boolean;
   tone?: "default" | "danger";
 };
-
-type DriveCardState = {
-  id: string;
-  form: StartJobRequest;
-  continuousMode: boolean;
-  continuousStatus: string | null;
-};
-
-function createCardId() {
-  return globalThis.crypto?.randomUUID?.() ?? `drive-card-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function buildDefaultStartJobRequest(): StartJobRequest {
-  return {
-    discLabel: "",
-    opticalDrive: null,
-    mediaType: "movie",
-    movieMode: "single",
-    discScope: "full_season",
-    seasonNumber: 1,
-    episodeRangeStart: 1,
-    episodeRangeEnd: 10,
-  };
-}
-
-function buildDriveCardState(): DriveCardState {
-  return {
-    id: createCardId(),
-    form: buildDefaultStartJobRequest(),
-    continuousMode: false,
-    continuousStatus: null,
-  };
-}
 
 export default function App() {
   const [jobs, setJobs] = useState<JobSummary[]>([]);
@@ -121,7 +92,9 @@ export default function App() {
   const [configLoading, setConfigLoading] = useState(true);
   const [configReady, setConfigReady] = useState(false);
   const [discDrives, setDiscDrives] = useState<DiscDrive[]>([]);
-  const [driveCards, setDriveCards] = useState<DriveCardState[]>([buildDriveCardState()]);
+  const [driveCards, setDriveCards] = useState<DriveCardState[]>(() =>
+    deserializeDriveCards(window.localStorage.getItem(DRIVE_CARDS_STORAGE_KEY)),
+  );
   const [modal, setModal] = useState<null | "tmdb" | "map" | "file" | "split" | "review">(null);
   const [modalJobId, setModalJobId] = useState<string | null>(null);
   const [modalValues, setModalValues] = useState<Record<string, string>>({});
@@ -277,6 +250,16 @@ export default function App() {
 
   useEffect(() => {
     driveCardsRef.current = driveCards;
+  }, [driveCards]);
+
+  // Drive setup is a property of the machine, not of a session. Losing it on
+  // every reload meant re-adding and re-assigning a second drive by hand.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(DRIVE_CARDS_STORAGE_KEY, serializeDriveCards(driveCards));
+    } catch {
+      // Storage full or blocked: the app still works, it just forgets.
+    }
   }, [driveCards]);
 
   useEffect(() => {

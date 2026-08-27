@@ -10,6 +10,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   BOOLEAN_CONFIG_KEYS,
+  buildDriveCardState,
+  deserializeDriveCards,
+  serializeDriveCards,
   MOVIE_PIPELINE_STAGES,
   TV_PIPELINE_STAGES,
   buildConfigDraft,
@@ -244,5 +247,71 @@ describe("display helpers", () => {
     expect(typeof formatRelativeTime(new Date().toISOString())).toBe("string");
     expect(() => formatRelativeTime("not a date")).not.toThrow();
     expect(() => formatRelativeTime(null)).not.toThrow();
+  });
+});
+
+
+describe("drive card persistence", () => {
+  it("remembers which drive each card is assigned to", () => {
+    const cards = [
+      { ...buildDriveCardState(), form: { ...buildDriveCardState().form, opticalDrive: "E:" } },
+      { ...buildDriveCardState(), form: { ...buildDriveCardState().form, opticalDrive: "F:" } },
+    ];
+    const restored = deserializeDriveCards(serializeDriveCards(cards));
+    expect(restored).toHaveLength(2);
+    expect(restored.map((c) => c.form.opticalDrive)).toEqual(["E:", "F:"]);
+  });
+
+  it("keeps the tv settings on a tv card", () => {
+    const card = buildDriveCardState();
+    card.form = { ...card.form, mediaType: "tv", seasonNumber: 4, discScope: "partial_season" };
+    const [restored] = deserializeDriveCards(serializeDriveCards([card]));
+    expect(restored.form.mediaType).toBe("tv");
+    expect(restored.form.seasonNumber).toBe(4);
+    expect(restored.form.discScope).toBe("partial_season");
+  });
+
+  it("does not carry a stale disc label across sessions", () => {
+    // The label belongs to whatever disc is in the drive now, not to the one
+    // that happened to be there last time.
+    const card = buildDriveCardState();
+    card.form = { ...card.form, discLabel: "PONYO" };
+    const [restored] = deserializeDriveCards(serializeDriveCards([card]));
+    expect(restored.form.discLabel).toBe("");
+  });
+
+  it("does not restore continuous mode", () => {
+    // Otherwise an app opened weeks later would start ripping whatever disc
+    // was left in the tray.
+    const card = { ...buildDriveCardState(), continuousMode: true, continuousStatus: "on" };
+    const [restored] = deserializeDriveCards(serializeDriveCards([card]));
+    expect(restored.continuousMode).toBe(false);
+    expect(restored.continuousStatus).toBeNull();
+  });
+
+  it("falls back to a single card when nothing is stored", () => {
+    expect(deserializeDriveCards(null)).toHaveLength(1);
+  });
+
+  it("never leaves the user with a blank sidebar", () => {
+    // Anything unusable must degrade to one working card rather than none.
+    for (const bad of ["{not json", "[]", "null", '"a string"', "[null, 3]"]) {
+      const restored = deserializeDriveCards(bad);
+      expect(restored.length, `input ${bad}`).toBeGreaterThanOrEqual(1);
+      expect(restored[0].form.mediaType).toBeTruthy();
+    }
+  });
+
+  it("fills in fields written by an older version", () => {
+    const restored = deserializeDriveCards(JSON.stringify([{ id: "x", form: { opticalDrive: "E:" } }]));
+    expect(restored[0].form.mediaType).toBe("movie");
+    expect(restored[0].form.movieMode).toBeTruthy();
+    expect(restored[0].id).toBe("x");
+  });
+
+  it("gives a card without an id a fresh one", () => {
+    const restored = deserializeDriveCards(JSON.stringify([{ form: { opticalDrive: "F:" } }]));
+    expect(typeof restored[0].id).toBe("string");
+    expect(restored[0].id.length).toBeGreaterThan(0);
   });
 });

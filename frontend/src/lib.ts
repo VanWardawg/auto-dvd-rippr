@@ -308,3 +308,109 @@ export function coerceConfigDraft(draft: Record<string, string>): Record<string,
   }
   return coerced;
 }
+
+export type DriveCardState = {
+  id: string;
+  form: StartJobRequest;
+  continuousMode: boolean;
+  continuousStatus: string | null;
+};
+
+export const DRIVE_CARDS_STORAGE_KEY = "autorippr-drive-cards";
+
+export function createCardId() {
+  return globalThis.crypto?.randomUUID?.() ?? `drive-card-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+export function buildDefaultStartJobRequest(): StartJobRequest {
+  return {
+    discLabel: "",
+    opticalDrive: null,
+    mediaType: "movie",
+    movieMode: "single",
+    discScope: "full_season",
+    seasonNumber: 1,
+    episodeRangeStart: 1,
+    episodeRangeEnd: 10,
+  };
+}
+
+export function buildDriveCardState(): DriveCardState {
+  return {
+    id: createCardId(),
+    form: buildDefaultStartJobRequest(),
+    continuousMode: false,
+    continuousStatus: null,
+  };
+}
+
+/**
+ * Reduce a drive card to the part worth remembering between sessions.
+ *
+ * Deliberately excludes the disc label, which belongs to whatever disc is in
+ * the drive right now, and continuous mode, which stays opt-in per session --
+ * restoring it would mean an app launched weeks later starts ripping whatever
+ * disc happens to be sitting in the tray.
+ */
+export function serializeDriveCards(cards: DriveCardState[]): string {
+  return JSON.stringify(
+    cards.map((card) => ({
+      id: card.id,
+      form: {
+        opticalDrive: card.form.opticalDrive ?? null,
+        mediaType: card.form.mediaType,
+        movieMode: card.form.movieMode,
+        discScope: card.form.discScope,
+        seasonNumber: card.form.seasonNumber ?? null,
+        episodeRangeStart: card.form.episodeRangeStart ?? null,
+        episodeRangeEnd: card.form.episodeRangeEnd ?? null,
+      },
+    })),
+  );
+}
+
+/**
+ * Rebuild drive cards from storage, falling back to a single default card.
+ *
+ * Anything unrecognised is discarded rather than trusted: this is parsing
+ * data written by an older version of the app, and a malformed entry must not
+ * leave the user with a blank sidebar.
+ */
+export function deserializeDriveCards(raw: string | null): DriveCardState[] {
+  if (!raw) return [buildDriveCardState()];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [buildDriveCardState()];
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return [buildDriveCardState()];
+
+  const defaults = buildDefaultStartJobRequest();
+  const cards: DriveCardState[] = [];
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object") continue;
+    const form = (entry as { form?: Partial<StartJobRequest> }).form ?? {};
+    const mediaType = form.mediaType === "tv" ? "tv" : "movie";
+    cards.push({
+      id: typeof (entry as { id?: unknown }).id === "string" ? (entry as { id: string }).id : createCardId(),
+      form: {
+        ...defaults,
+        // The label always comes from the disc currently in the drive.
+        discLabel: "",
+        opticalDrive: typeof form.opticalDrive === "string" ? form.opticalDrive : null,
+        mediaType,
+        movieMode: form.movieMode ?? defaults.movieMode,
+        discScope: form.discScope ?? defaults.discScope,
+        seasonNumber: typeof form.seasonNumber === "number" ? form.seasonNumber : defaults.seasonNumber,
+        episodeRangeStart:
+          typeof form.episodeRangeStart === "number" ? form.episodeRangeStart : defaults.episodeRangeStart,
+        episodeRangeEnd:
+          typeof form.episodeRangeEnd === "number" ? form.episodeRangeEnd : defaults.episodeRangeEnd,
+      },
+      continuousMode: false,
+      continuousStatus: null,
+    });
+  }
+  return cards.length ? cards : [buildDriveCardState()];
+}
