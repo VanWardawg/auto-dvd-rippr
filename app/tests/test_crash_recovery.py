@@ -311,3 +311,83 @@ class TruncatedLogRecoveryTests(unittest.TestCase):
             SimpleNamespace(title_id=1, duration_seconds=90.0, chapter_count=1, source_file="b.mkv")
         ]
         self.assertFalse(rip._durations_match_the_disc(titles, self.DISC_INFO))
+
+
+class SupersededIdentifyTests(unittest.TestCase):
+    """
+    A slow identify attempt must not act on a job somebody already resolved.
+
+    Real timeline from ALVIN_AND_THE_CHIPMUNKS_4X3: TMDB returned nothing at
+    03:40 and the pipeline began DVD menu analysis. The user searched manually
+    and selected at 03:41; the job reached `done` at 03:42. At 03:58 -- sixteen
+    minutes after it finished -- the original attempt came out of menu analysis
+    and executed its "needs review" path anyway, stamping awaiting_review on a
+    completed job and ejecting the drive, which by then could have held an
+    entirely different disc.
+    """
+
+    def _run_with_menu_analysis_that_takes_too_long(self, resolve_to: str | None):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = build_config(root)
+            conn = open_db(cfg.db_path)
+            try:
+                job_id = create_job(conn, disc_label="ALVIN_4X3", media_type="movie")
+                transition_job(conn, job_id, "ripping")
+                conn.execute(
+                    "INSERT INTO rip_titles (job_id, title_id, duration_seconds, source_file) "
+                    "VALUES (?,?,?,?)",
+                    (job_id, 0, 5400.0, "t00.mkv"),
+                )
+                transition_job(conn, job_id, "identifying")
+                conn.commit()
+
+                def resolve_meanwhile(*_args, **_kwargs):
+                    # Stands in for the user finishing the job by hand while
+                    # menu analysis grinds away.
+                    if resolve_to:
+                        conn.execute(
+                            "UPDATE jobs SET status = ?, current_stage = ? WHERE id = ?",
+                            (resolve_to, resolve_to, job_id),
+                        )
+                        conn.commit()
+
+                with patch(
+                    "autorippr.pipeline.identify_job_with_tmdb",
+                    return_value={"needs_review": True, "selected": None, "candidates": []},
+                ), patch(
+                    "autorippr.pipeline.analyze_dvd_menu", side_effect=resolve_meanwhile
+                ), patch("autorippr.pipeline.release_disc") as release, patch(
+                    "autorippr.pipeline._warn_if_nas_unreachable"
+                ):
+                    result = run_pipeline_for_job(conn, cfg, job_id)
+                return result, get_job(conn, job_id), release
+            finally:
+                conn.close()
+
+    def test_a_finished_job_is_not_marked_awaiting_review(self) -> None:
+        result, job, _ = self._run_with_menu_analysis_that_takes_too_long("done")
+        self.assertEqual(job["awaiting_review"], 0)
+        self.assertTrue(result.get("superseded"))
+
+    def test_it_does_not_eject_a_drive_it_no_longer_owns(self) -> None:
+        # The dangerous half: by 03:58 that drive could hold another disc.
+        _, _, release = self._run_with_menu_analysis_that_takes_too_long("done")
+        release.assert_not_called()
+
+    def test_a_job_still_identifying_pauses_for_review_as_before(self) -> None:
+        # The guard must not stop the normal case from asking for help.
+        result, job, release = self._run_with_menu_analysis_that_takes_too_long(None)
+        self.assertTrue(result.get("needs_review"))
+        self.assertEqual(job["awaiting_review"], 1)
+        release.assert_called_once()
+
+    def test_a_deleted_job_does_not_crash_the_attempt(self) -> None:
+        from autorippr import pipeline
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = build_config(Path(tmp))
+            conn = open_db(cfg.db_path)
+            try:
+                self.assertFalse(pipeline._job_is_still_identifying(conn, "no-such-job"))
+            finally:
+                conn.close()

@@ -298,6 +298,27 @@ def run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = Fal
                         conn.commit()
                     else:
                         ident = identify_job_with_tmdb(conn, cfg, job_id)
+
+                    # Menu analysis runs for minutes -- a median of one, and
+                    # eleven on one recorded job -- and the user can resolve
+                    # the job by hand the whole time it does. One really did:
+                    # the job reached `done` at 03:42 and this attempt woke at
+                    # 03:58 to mark it awaiting review and eject the drive,
+                    # which by then could have held a different disc.
+                    if not _job_is_still_identifying(conn, job_id):
+                        current = str((get_job(conn, job_id) or {}).get("status") or "unknown")
+                        append_job_log(
+                            conn,
+                            job_id,
+                            "INFO",
+                            f"Job was resolved elsewhere while menu analysis ran (now {current}); "
+                            "abandoning this identify attempt.",
+                            None,
+                            None,
+                        )
+                        conn.commit()
+                        return {"status": current, "superseded": True}
+
                 if ident["needs_review"]:
                     # Identification has done all it can; the disc is no longer
                     # needed, and this job is about to sit waiting for a human.
@@ -529,6 +550,19 @@ def _warn_if_nas_unreachable(conn, cfg: AppConfig, job_id: str) -> None:
         None,
     )
     conn.commit()
+
+
+
+def _job_is_still_identifying(conn, job_id: str) -> bool:
+    """
+    Whether this job is still where the identify attempt left it.
+
+    Mirrors `_job_is_still_ripping` in rip.py: any work that runs for minutes
+    has to re-check the job before acting, because the job can be finished,
+    cancelled, or deleted underneath it.
+    """
+    job = get_job(conn, job_id)
+    return bool(job) and str(job.get("status") or "") == "identifying"
 
 
 def _execute_rip_and_advance(conn, cfg: AppConfig, job_id: str, *, mock_rip: bool) -> str:
