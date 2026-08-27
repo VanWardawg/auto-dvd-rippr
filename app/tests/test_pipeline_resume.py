@@ -495,3 +495,82 @@ class DiscReleaseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReidentifiedJobTests(unittest.TestCase):
+    """
+    Correcting a misidentification must actually reach the NAS.
+
+    ALVIN_AND_THE_CHIPMUNKS_3 was auto-identified as the 2007 original and
+    finalized under that name. Selecting the right film afterwards changed
+    nothing visible: resume saw finalized outputs, went straight to the copy,
+    and sent the file under the old name -- the correction was silently
+    discarded, and only a manual `job rebuild-output` applied it.
+    """
+
+    def _job_with_outputs(self, conn, root: Path, *, selected_at: str, finalized_at: str):
+        job_id = create_job(conn, disc_label="ALVIN_AND_THE_CHIPMUNKS_3", media_type="movie")
+        add_rip_title(conn, job_id)
+        conn.execute(
+            "INSERT INTO job_selected_media (job_id, media_type, tmdb_id, title, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (job_id, "movie", 55301, "Chipwrecked", selected_at, selected_at),
+        )
+        conn.execute(
+            "INSERT INTO finalized_manifests (job_id, manifest_json, created_at) VALUES (?,?,?)",
+            (job_id, "{}", finalized_at),
+        )
+        conn.execute(
+            "INSERT INTO outputs (job_id, local_path, transfer_status) VALUES (?,?,?)",
+            (job_id, str(root / "Alvin and the Chipmunks (2007).mkv"), "error"),
+        )
+        fail_job(conn, job_id, "copying")
+        return job_id
+
+    def test_a_later_selection_forces_a_rename_before_copying(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = open_db(build_config(root).db_path)
+            try:
+                job_id = self._job_with_outputs(
+                    conn, root,
+                    finalized_at="2026-08-27T04:20:00+00:00",
+                    selected_at="2026-08-27T04:45:00+00:00",
+                )
+                job = get_job(conn, job_id)
+                self.assertEqual(_infer_resume_stage(conn, job), "renaming")
+            finally:
+                conn.close()
+
+    def test_an_untouched_job_still_resumes_at_the_copy(self) -> None:
+        # The expensive-work rule still holds: a failed NAS copy must never
+        # cost a re-rip or a needless re-finalize.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = open_db(build_config(root).db_path)
+            try:
+                job_id = self._job_with_outputs(
+                    conn, root,
+                    selected_at="2026-08-27T04:20:00+00:00",
+                    finalized_at="2026-08-27T04:45:00+00:00",
+                )
+                self.assertEqual(_infer_resume_stage(conn, get_job(conn, job_id)), "copying")
+            finally:
+                conn.close()
+
+    def test_a_job_that_was_never_finalized_is_unaffected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = open_db(build_config(root).db_path)
+            try:
+                job_id = create_job(conn, disc_label="DISC", media_type="movie")
+                add_rip_title(conn, job_id)
+                select_media(conn, job_id, "movie")
+                conn.execute(
+                    "INSERT INTO outputs (job_id, local_path, transfer_status) VALUES (?,?,?)",
+                    (job_id, str(root / "m.mkv"), "pending"),
+                )
+                fail_job(conn, job_id, "copying")
+                self.assertEqual(_infer_resume_stage(conn, get_job(conn, job_id)), "copying")
+            finally:
+                conn.close()

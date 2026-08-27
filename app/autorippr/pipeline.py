@@ -168,6 +168,13 @@ def _infer_resume_stage(conn, job) -> str:
         "SELECT COUNT(*) AS c FROM outputs WHERE job_id = ?", (job_id,)
     ).fetchone()["c"]
     if outputs:
+        # ...unless the film was re-identified after they were built. Correcting
+        # a misidentification on a finalized job otherwise changed nothing the
+        # user could see: Resume went straight to the copy and sent the file
+        # under its old, wrong name. Re-finalizing is cheap -- it renames local
+        # files -- and it is the only way the correction reaches the NAS.
+        if _selection_is_newer_than_outputs(conn, job_id):
+            return "renaming"
         return "copying"
 
     if not _job_has_rip_titles(conn, job_id):
@@ -551,6 +558,32 @@ def _warn_if_nas_unreachable(conn, cfg: AppConfig, job_id: str) -> None:
     )
     conn.commit()
 
+
+
+
+def _selection_is_newer_than_outputs(conn, job_id: str) -> bool:
+    """
+    Whether the film was re-identified after this job's outputs were finalized.
+
+    Compares when the user last chose a title against when the finalized
+    manifest was written. Nothing records which TMDB id an output was named
+    for, but the timestamps answer the same question: a selection made after
+    finalization means the files on disk carry the previous film's name.
+    """
+    selected = conn.execute(
+        "SELECT updated_at FROM job_selected_media WHERE job_id = ? LIMIT 1", (job_id,)
+    ).fetchone()
+    manifest = conn.execute(
+        "SELECT created_at FROM finalized_manifests WHERE job_id = ? ORDER BY id DESC LIMIT 1",
+        (job_id,),
+    ).fetchone()
+    if not selected or not manifest:
+        return False
+    chosen = str(selected["updated_at"] or "")
+    built = str(manifest["created_at"] or "")
+    if not chosen or not built:
+        return False
+    return chosen > built
 
 
 def _job_is_still_identifying(conn, job_id: str) -> bool:
