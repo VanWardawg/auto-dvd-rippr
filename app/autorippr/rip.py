@@ -3,6 +3,7 @@ import csv
 import json
 import platform
 import re
+import sqlite3
 import shutil
 import subprocess
 import time
@@ -907,25 +908,43 @@ def _stream_one_makemkv_rip(
             per_title = 1.0 / max(1, title_count)
             overall = ((title_index - 1) + fraction) * per_title
 
-            upsert_progress(
-                conn,
-                job_id,
-                stage="ripping",
-                kind="ripping",
-                current_units=round(overall * PROGRESS_MAX, 2),
-                total_units=float(PROGRESS_MAX),
-                unit="ticks",
-                rate_per_second=rate_mb_s,
-                eta_seconds=eta_seconds,
-                detail=detail,
-                title_index=title_index,
-                title_count=title_count,
-            )
-            conn.execute(
-                "UPDATE jobs SET updated_at = ? WHERE id = ?",
-                (datetime.now(timezone.utc).isoformat(), job_id),
-            )
-            conn.commit()
+            # Progress is telemetry for the UI, and telemetry must never be
+            # able to abort the work it is reporting on. A second job entering
+            # its mapping stage holds the write lock long enough for this
+            # once-a-second commit to exceed the busy timeout, and the raised
+            # OperationalError killed a rip that was twenty minutes in and
+            # perfectly healthy -- leaving MakeMKV orphaned and the job stuck
+            # in `ripping`. Losing a heartbeat costs a stale progress bar for
+            # one second, which is not a reason to lose the rip.
+            try:
+                upsert_progress(
+                    conn,
+                    job_id,
+                    stage="ripping",
+                    kind="ripping",
+                    current_units=round(overall * PROGRESS_MAX, 2),
+                    total_units=float(PROGRESS_MAX),
+                    unit="ticks",
+                    rate_per_second=rate_mb_s,
+                    eta_seconds=eta_seconds,
+                    detail=detail,
+                    title_index=title_index,
+                    title_count=title_count,
+                )
+                conn.execute(
+                    "UPDATE jobs SET updated_at = ? WHERE id = ?",
+                    (datetime.now(timezone.utc).isoformat(), job_id),
+                )
+                conn.commit()
+            except sqlite3.Error as exc:
+                log.warning(
+                    "could not record rip progress; continuing",
+                    extra={"job_id": job_id, "error": str(exc)},
+                )
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
     finally:
         if proc.stdout is not None:
             proc.stdout.close()
@@ -1140,7 +1159,21 @@ def _ensure_job_still_ripping(conn, job_id: str) -> None:
 
 
 def _job_is_still_ripping(conn, job_id: str) -> bool:
-    job = get_job(conn, job_id)
+    """
+    Whether the job still wants this rip, as far as we can tell.
+
+    A database we cannot read is not a cancellation. Treating it as one would
+    abort a healthy rip over a transient lock, so an unreadable database means
+    "carry on" -- a real cancellation is still there to be seen a second later.
+    """
+    try:
+        job = get_job(conn, job_id)
+    except sqlite3.Error as exc:
+        log.warning(
+            "could not check job status; assuming the rip should continue",
+            extra={"job_id": job_id, "error": str(exc)},
+        )
+        return True
     if not job:
         return False
     return str(job.get("status")) == "ripping"

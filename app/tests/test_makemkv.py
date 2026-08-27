@@ -8,6 +8,7 @@ is the difference between a 20-minute and a 60-minute disc.
 import io
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 import unittest.mock
@@ -494,3 +495,113 @@ class FailureDescriptionTests(unittest.TestCase):
     def test_an_unrecognised_failure_still_points_at_the_log(self) -> None:
         msg = rip._describe_makemkv_failure("MSG:9999,0,0,\"something new\"", Path("mk.log"))
         self.assertIn("mk.log", msg)
+
+
+class ProgressFailureTests(unittest.TestCase):
+    """
+    Telemetry must never be able to abort the work it reports on.
+
+    Two jobs ran at once. The first finished and entered mapping, which holds
+    the write lock while it writes a season's episodes; the second was twenty
+    minutes into a healthy rip, committing a progress heartbeat every second.
+    That commit exceeded the busy timeout and raised, which killed the rip,
+    orphaned MakeMKV, and left the job stuck in `ripping`.
+    """
+
+    def _stream(self, *, progress_raises: bool, status_raises: bool = False):
+        import sqlite3 as sq
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "out"
+            out.mkdir()
+            log_path = root / "makemkv.log"
+
+            lines = [
+                "PRGV:100,100,65536\n",
+                "PRGV:200,200,65536\n",
+                'MSG:5011,0,0,"Operation successfully completed"\n',
+            ]
+
+            class FakeStdout:
+                def __init__(self, rows):
+                    self._rows = iter(rows)
+
+                def __iter__(self):
+                    return self._rows
+
+                def close(self):
+                    pass
+
+            class FakeProc:
+                returncode = 0
+
+                def __init__(self):
+                    self.stdout = FakeStdout(lines)
+
+                def wait(self):
+                    return 0
+
+                def kill(self):
+                    pass
+
+            def fake_upsert(*_a, **_k):
+                if progress_raises:
+                    raise sq.OperationalError("database is locked")
+
+            def fake_still_ripping(*_a, **_k):
+                if status_raises:
+                    raise sq.OperationalError("database is locked")
+                return True
+
+            conn = unittest.mock.MagicMock()
+            if progress_raises:
+                conn.execute.side_effect = sq.OperationalError("database is locked")
+
+            with patch.object(rip, "upsert_progress", side_effect=fake_upsert), patch.object(
+                rip, "_job_is_still_ripping", side_effect=fake_still_ripping
+            ), patch.object(rip.subprocess, "Popen", return_value=FakeProc()), patch.object(
+                rip, "_output_size_mb", return_value=10.0
+            ):
+                with open(log_path, "w", encoding="utf-8") as lf:
+                    return rip._stream_one_makemkv_rip(
+                        conn=conn,
+                        job_id="job",
+                        cmd=["mk", "mkv", "dev:E:", "0", str(out)],
+                        log_file=lf,
+                        output_dir=out,
+                        # monotonic() is uptime-based, so a literal 0 start
+                        # makes any timeout look already exceeded.
+                        started_at=time.monotonic(),
+                        timeout_seconds=99999,
+                        title_index=1,
+                        title_count=1,
+                    )
+
+    def test_a_locked_database_does_not_kill_the_rip(self) -> None:
+        # The whole incident in one assertion: the rip finishes anyway.
+        self.assertEqual(self._stream(progress_raises=True), 0)
+
+    def test_a_healthy_rip_is_unaffected(self) -> None:
+        self.assertEqual(self._stream(progress_raises=False), 0)
+
+
+class CancellationCheckTests(unittest.TestCase):
+    def test_an_unreadable_database_is_not_a_cancellation(self) -> None:
+        # Aborting a healthy rip over a transient lock is the failure mode this
+        # avoids; a real cancellation is still there to be seen a second later.
+        import sqlite3 as sq
+
+        conn = unittest.mock.MagicMock()
+        with patch.object(rip, "get_job", side_effect=sq.OperationalError("database is locked")):
+            self.assertTrue(rip._job_is_still_ripping(conn, "job"))
+
+    def test_a_cancelled_job_still_stops_the_rip(self) -> None:
+        conn = unittest.mock.MagicMock()
+        with patch.object(rip, "get_job", return_value={"status": "error"}):
+            self.assertFalse(rip._job_is_still_ripping(conn, "job"))
+
+    def test_a_deleted_job_still_stops_the_rip(self) -> None:
+        conn = unittest.mock.MagicMock()
+        with patch.object(rip, "get_job", return_value=None):
+            self.assertFalse(rip._job_is_still_ripping(conn, "job"))
