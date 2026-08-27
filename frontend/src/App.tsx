@@ -1262,7 +1262,11 @@ export default function App() {
                 (entry) => entry.season_number === card.form.seasonNumber,
               );
               const showDiscScope = card.form.mediaType === "tv";
-              const showSeasonNumber = card.form.mediaType === "tv";
+              // A compilation draws from across the show, so it has no season of
+              // its own and is not one disc of a set -- asking for either would
+              // be asking a question with no answer.
+              const isCompilation = card.form.discScope === "compilation";
+              const showSeasonNumber = card.form.mediaType === "tv" && !isCompilation;
               const showEpisodeRange = card.form.mediaType === "tv" && card.form.discScope === "partial_season";
               const showMovieMode = card.form.mediaType === "movie";
               return (
@@ -1419,6 +1423,7 @@ export default function App() {
                               {lookup.detail.year ? ` (${lookup.detail.year})` : ""} &middot;{" "}
                               {lookup.detail.total_episodes} episodes
                             </p>
+                            {isCompilation ? null : (
                             <div className="show-lookup-row">
                               <label>
                                 <span>Season</span>
@@ -1454,7 +1459,23 @@ export default function App() {
                                 />
                               </label>
                             </div>
-                            {chosenSeason ? (
+                            )}
+                            {isCompilation ? (
+                              <p className="show-lookup-hint">
+                                {(() => {
+                                  const numbered = lookup.detail.seasons.filter((s) => !s.is_specials);
+                                  const specials = lookup.detail.seasons.find((s) => s.is_specials);
+                                  const pool = numbered.reduce((sum, s) => sum + s.episode_count, 0);
+                                  const withSpecials = pool + (specials?.episode_count ?? 0);
+                                  return card.form.includeSpecials && specials
+                                    ? `Matching by episode name across all ${numbered.length} seasons plus specials \u2014 ${withSpecials} candidates.`
+                                    : `Matching by episode name across all ${numbered.length} seasons \u2014 ${pool} candidates${
+                                        specials ? `, or ${withSpecials} with specials` : ""
+                                      }.`;
+                                })()}
+                              </p>
+                            ) : null}
+                            {!isCompilation && chosenSeason ? (
                               <p className="show-lookup-hint">
                                 {chosenSeason.is_specials
                                   ? `${chosenSeason.episode_count} specials. These are a grab-bag rather than a run, so pick the episodes by hand.`
