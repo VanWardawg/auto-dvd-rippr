@@ -380,8 +380,7 @@ def recover_completed_rip(conn, cfg: AppConfig, job_id: str) -> dict[str, Any] |
         return None
 
     log_text = makemkv_log_path.read_text(encoding="utf-8", errors="replace")
-    if "Copy complete." not in log_text and "titles saved" not in log_text:
-        return None
+    makemkv_said_done = "Copy complete." in log_text or "titles saved" in log_text
 
     mkv_files = sorted(rip_output_dir.glob("*.mkv"))
     if not mkv_files:
@@ -403,12 +402,26 @@ def recover_completed_rip(conn, cfg: AppConfig, job_id: str) -> dict[str, Any] |
     )
     if not titles:
         return None
+
+    # MakeMKV's own "Copy complete." line is the normal proof that the rip
+    # finished -- but that line only reaches the log if the process reading
+    # MakeMKV's output is alive to write it. When the pipeline crashes
+    # mid-rip, MakeMKV survives as an orphan and finishes the file perfectly,
+    # leaving a complete, playable MKV beside a log truncated at the moment of
+    # the crash. Refusing to recover that means re-ripping a disc whose rip is
+    # already sitting on disk, finished.
+    if not makemkv_said_done and not _durations_match_the_disc(titles, disc_info_by_title):
+        return None
+
     _persist_rip_titles(conn, job_id, titles)
     append_job_log(
         conn=conn,
         job_id=job_id,
         level="WARNING",
-        message=f"Recovered completed rip from existing output. Titles={len(titles)}",
+        message=(
+            f"Recovered completed rip from existing output. Titles={len(titles)}"
+            + ("" if makemkv_said_done else " (log truncated; verified by duration)")
+        ),
         from_status=None,
         to_status=None,
     )
@@ -428,6 +441,43 @@ def recover_completed_rip(conn, cfg: AppConfig, job_id: str) -> dict[str, Any] |
             for t in titles
         ],
     }
+
+
+
+# A finished title matches the length the disc scan predicted; one cut short by
+# a crash does not. 2% absorbs container overhead without admitting a partial.
+RECOVERY_DURATION_TOLERANCE = 0.02
+
+
+def _durations_match_the_disc(titles, disc_info_by_title: dict[int, dict[str, Any]]) -> bool:
+    """
+    Whether every ripped file is as long as the disc said its title would be.
+
+    This is the completeness check for output whose log did not survive. A rip
+    interrupted partway produces a short file, which is exactly what the
+    missing completion marker was there to exclude -- so measuring length
+    tests the same thing directly, and without depending on the log.
+    """
+    if not disc_info_by_title:
+        return False
+    expected = [
+        candidate.duration_seconds
+        for candidate in build_title_candidates(disc_info_by_title)
+        if candidate.duration_seconds > 0
+    ]
+    if not expected:
+        return False
+
+    for title in titles:
+        actual = float(getattr(title, "duration_seconds", 0) or 0)
+        if actual <= 0:
+            return False
+        if not any(
+            abs(actual - want) <= max(2.0, want * RECOVERY_DURATION_TOLERANCE)
+            for want in expected
+        ):
+            return False
+    return True
 
 
 def _ensure_space_for_rip(

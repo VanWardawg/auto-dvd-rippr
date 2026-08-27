@@ -256,3 +256,58 @@ class AbandonedRipTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TruncatedLogRecoveryTests(unittest.TestCase):
+    """
+    A rip whose log died but whose file finished must not be re-ripped.
+
+    From the same incident: the pipeline process died at 02:55, so makemkv.log
+    stops mid-PRGV and never gets MakeMKV's "Copy complete." line. But MakeMKV
+    itself carried on as an orphan for another 25 minutes and wrote a complete,
+    playable 4.77 GB file -- 4511s against the 4510s the disc scan predicted.
+    Recovery keyed on the log marker alone, so it would have thrown that away
+    and re-ripped an 84-minute disc.
+    """
+
+    # The shape _parse_makemkv_info_output actually returns: attributes nested
+    # under "fields", keyed by MakeMKV's numeric attribute codes (9 = duration).
+    DISC_INFO = {
+        0: {
+            "fields": {"8": "18", "9": "1:15:10", "10": "4.7 GB", "11": "5124672022"},
+            "display_name": "C1_t00.mkv",
+        }
+    }
+
+    def _titles(self, seconds):
+        return [SimpleNamespace(title_id=0, duration_seconds=seconds, chapter_count=12,
+                                source_file="C1_t00.mkv")]
+
+    def test_a_finished_file_is_accepted_without_the_marker(self) -> None:
+        from autorippr import rip
+        self.assertTrue(rip._durations_match_the_disc(self._titles(4511.97), self.DISC_INFO))
+
+    def test_a_rip_cut_short_is_rejected(self) -> None:
+        # The case the marker existed to catch: a partial file must still be
+        # refused, or recovery would register a truncated movie as complete.
+        from autorippr import rip
+        self.assertFalse(rip._durations_match_the_disc(self._titles(1200.0), self.DISC_INFO))
+
+    def test_a_file_slightly_short_of_the_disc_is_still_fine(self) -> None:
+        from autorippr import rip
+        self.assertTrue(rip._durations_match_the_disc(self._titles(4505.0), self.DISC_INFO))
+
+    def test_without_disc_info_it_refuses_to_guess(self) -> None:
+        from autorippr import rip
+        self.assertFalse(rip._durations_match_the_disc(self._titles(4511.97), {}))
+
+    def test_an_unprobeable_file_is_rejected(self) -> None:
+        from autorippr import rip
+        self.assertFalse(rip._durations_match_the_disc(self._titles(0), self.DISC_INFO))
+
+    def test_one_bad_title_among_good_ones_rejects_the_lot(self) -> None:
+        from autorippr import rip
+        titles = self._titles(4511.97) + [
+            SimpleNamespace(title_id=1, duration_seconds=90.0, chapter_count=1, source_file="b.mkv")
+        ]
+        self.assertFalse(rip._durations_match_the_disc(titles, self.DISC_INFO))
