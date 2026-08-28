@@ -33,6 +33,44 @@ class EpisodeTarget:
     season_number: int = 1
 
 
+
+def _job_disc_drive(conn, job_id: str) -> str | None:
+    """The drive this job's disc was read from, if it is recorded."""
+    row = conn.execute("SELECT optical_drive FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if not row:
+        return None
+    drive = str(row["optical_drive"] or "").strip()
+    return drive or None
+
+
+def _job_disc_root(expected_drive: str | None) -> Path | None:
+    """
+    The disc root for this job, and only for this job.
+
+    Menu and OCR capture used to take the first drive with a disc in it,
+    whoever that disc belonged to. Once a job ejects its own disc -- which the
+    TV path does as soon as the rip finishes, to free the drive -- that meant
+    reading whatever was in the other bay. A Minnie's Pet Salon job ran OCR
+    against the disc being ripped in F:, which was both the wrong film's menu
+    and a drive already saturated by an active rip; ffmpeg timed out after five
+    minutes and took the job down with it.
+
+    Returning None is the right answer when the disc is gone. OCR then falls
+    back to the ripped title file, which is local, fast, and unambiguously the
+    right content.
+    """
+    if not expected_drive:
+        return None
+    wanted = expected_drive.strip().rstrip("\\").upper()
+    for drive in discover_optical_drives():
+        if not drive.get("has_media"):
+            continue
+        letter = str(drive.get("drive") or "").strip().rstrip("\\").upper()
+        if letter == wanted:
+            return Path(str(drive["root"]))
+    return None
+
+
 def analyze_dvd_menu(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
     job = conn.execute(
         """
@@ -50,10 +88,13 @@ def analyze_dvd_menu(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
     analysis_dir.mkdir(parents=True, exist_ok=True)
 
     # Generate expensive artifacts once here, not during normal mapping.
-    vlc_nav_screenshots = _capture_vlc_menu_snapshots(cfg, job_id, generate=True)
-    dvd_arch_pages = _capture_dvd_archaeology_menu_pages(cfg, job_id, generate=True)
-    dvd_arch_crops = _capture_dvd_archaeology_button_crops(cfg, job_id, generate=True)
-    dvdnav_crops = _capture_dvdnav_button_crops(cfg, job_id, generate=True)
+    # Only ever this job's own disc: once a job ejects, "the first drive with
+    # media" is somebody else's disc, very possibly one mid-rip.
+    disc_drive = _job_disc_drive(conn, job_id)
+    vlc_nav_screenshots = _capture_vlc_menu_snapshots(cfg, job_id, generate=True, disc_drive=disc_drive)
+    dvd_arch_pages = _capture_dvd_archaeology_menu_pages(cfg, job_id, generate=True, disc_drive=disc_drive)
+    dvd_arch_crops = _capture_dvd_archaeology_button_crops(cfg, job_id, generate=True, disc_drive=disc_drive)
+    dvdnav_crops = _capture_dvdnav_button_crops(cfg, job_id, generate=True, disc_drive=disc_drive)
     media_title_hints = _collect_media_title_hints(
         cfg,
         job_id,
@@ -258,7 +299,7 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
             )
 
     _clear_downstream_state_for_remap(conn, cfg, job_id)
-    planned = _plan_mappings(rip_rows, targets, cfg, job_id)
+    planned = _plan_mappings(rip_rows, targets, cfg, job_id, _job_disc_drive(conn, job_id))
     # Rows are built at several points in the planner, so the season is derived
     # here from the episodes each row actually claims rather than threaded
     # through every one of them. For a normal disc every target shares a
@@ -521,6 +562,7 @@ def _plan_mappings(
     targets: list[EpisodeTarget],
     cfg: AppConfig,
     job_id: str,
+    disc_drive: str | None = None,
 ) -> list[dict[str, Any]]:
     remaining = targets[:]
     output: list[dict[str, Any]] = []
@@ -639,6 +681,7 @@ def _plan_mappings(
         if not menu_match and _should_try_ocr_menu_fallback(menu_name):
             attempted_ocr = True
             ocr_result = _find_best_ocr_menu_match(
+                disc_drive=disc_drive,
                 cfg=cfg,
                 job_id=job_id,
                 source_file=str(r["source_file"]),
@@ -1224,6 +1267,7 @@ def _find_best_ocr_menu_match(
     source_file: str,
     rip_title_id: int,
     targets: list[EpisodeTarget],
+    disc_drive: str | None = None,
 ) -> dict[str, Any]:
     if not targets:
         return {"match": None, "artifact_image_path": None, "artifact_text_path": None, "best_score": None}
@@ -1233,7 +1277,7 @@ def _find_best_ocr_menu_match(
     tesseract = _resolve_tesseract_executable()
     if tesseract is None:
         return {"match": None, "artifact_image_path": None, "artifact_text_path": None, "best_score": None}
-    candidate_sources = _build_ocr_source_candidates(source_file)
+    candidate_sources = _build_ocr_source_candidates(source_file, disc_drive)
     if not candidate_sources:
         return {
             "match": None,
@@ -1463,9 +1507,9 @@ def _find_best_ocr_menu_match(
     }
 
 
-def _build_ocr_source_candidates(source_file: str) -> list[dict[str, str]]:
+def _build_ocr_source_candidates(source_file: str, expected_drive: str | None = None) -> list[dict[str, str]]:
     candidates: list[dict[str, str]] = []
-    menu_files = _discover_dvd_menu_vobs()
+    menu_files = _discover_dvd_menu_vobs(expected_drive)
     for idx, menu_file in enumerate(menu_files, start=1):
         candidates.append(
             {
@@ -1491,10 +1535,24 @@ def _build_ocr_source_candidates(source_file: str) -> list[dict[str, str]]:
     return candidates
 
 
-def _discover_dvd_menu_vobs() -> list[Path]:
+def _discover_dvd_menu_vobs(expected_drive: str | None = None) -> list[Path]:
+    """
+    Menu VOBs on this job's disc.
+
+    Without a drive to scope to, this returns nothing rather than searching
+    every bay: OCR then falls back to the ripped title file, which is local and
+    unambiguously this job's content. Preferring "whatever disc is loaded
+    somewhere" is what had a Minnie's Pet Salon job reading the disc being
+    ripped in the other drive.
+    """
+    if _job_disc_root(expected_drive) is None:
+        return []
     files: list[Path] = []
     for drive in discover_optical_drives():
         if not drive.get("has_media"):
+            continue
+        letter = str(drive.get("drive") or "").strip().rstrip("\\").upper()
+        if letter != str(expected_drive).strip().rstrip("\\").upper():
             continue
         root = Path(str(drive["root"]))
         video_ts = root / "VIDEO_TS"
@@ -1515,12 +1573,10 @@ def _discover_dvd_menu_vobs() -> list[Path]:
     return deduped
 
 
-def _capture_dvd_archaeology_menu_pages(cfg: AppConfig, job_id: str, generate: bool = False) -> list[Path]:
-    drives = [d for d in discover_optical_drives() if d.get("has_media")]
-    if not drives:
+def _capture_dvd_archaeology_menu_pages(cfg: AppConfig, job_id: str, generate: bool = False, disc_drive: str | None = None) -> list[Path]:
+    disc_root = _job_disc_root(disc_drive)
+    if disc_root is None:
         return []
-
-    disc_root = Path(str(drives[0]["root"]))
     out_dir = Path(cfg.staging_root) / "jobs" / job_id / "dvd_arch_menu"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1547,11 +1603,11 @@ def _capture_dvd_archaeology_menu_pages(cfg: AppConfig, job_id: str, generate: b
     return sorted(detect_dir.glob("*.png"))
 
 
-def _capture_dvdnav_button_crops(cfg: AppConfig, job_id: str, generate: bool = False) -> list[Path]:
-    drives = [d for d in discover_optical_drives() if d.get("has_media")]
-    if not drives:
+def _capture_dvdnav_button_crops(cfg: AppConfig, job_id: str, generate: bool = False, disc_drive: str | None = None) -> list[Path]:
+    root = _job_disc_root(disc_drive)
+    if root is None:
         return []
-    drive_root = str(drives[0]["root"])
+    drive_root = str(root)
     artifact_path = Path(cfg.staging_root) / "jobs" / job_id / "dvdnav_menu" / "dvdnav_menu.json"
     if generate or not artifact_path.exists():
         payload = extract_dvdnav_menu_artifacts(
@@ -1646,12 +1702,10 @@ def _capture_dvdnav_button_crops(cfg: AppConfig, job_id: str, generate: bool = F
     return sorted(out_dir.glob("*.png"))
 
 
-def _capture_dvd_archaeology_button_crops(cfg: AppConfig, job_id: str, generate: bool = False) -> list[Path]:
-    drives = [d for d in discover_optical_drives() if d.get("has_media")]
-    if not drives:
+def _capture_dvd_archaeology_button_crops(cfg: AppConfig, job_id: str, generate: bool = False, disc_drive: str | None = None) -> list[Path]:
+    disc_root = _job_disc_root(disc_drive)
+    if disc_root is None:
         return []
-
-    disc_root = Path(str(drives[0]["root"]))
     out_dir = Path(cfg.staging_root) / "jobs" / job_id / "dvd_arch_menu"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1912,14 +1966,13 @@ except Exception:
     return any(page_dir.glob("*.png")) or any(detect_dir.glob("*.png"))
 
 
-def _capture_vlc_menu_snapshots(cfg: AppConfig, job_id: str, generate: bool = False) -> list[Path]:
+def _capture_vlc_menu_snapshots(cfg: AppConfig, job_id: str, generate: bool = False, disc_drive: str | None = None) -> list[Path]:
     vlc_path = _resolve_vlc_executable()
     if vlc_path is None:
         return []
-    drives = [d for d in discover_optical_drives() if d.get("has_media")]
-    if not drives:
+    if _job_disc_root(disc_drive) is None:
         return []
-    drive = str(drives[0]["drive"])
+    drive = str(disc_drive)
 
     snapshot_dir = Path(cfg.staging_root) / "jobs" / job_id / "ocr" / "vlc_nav"
     snapshot_dir.mkdir(parents=True, exist_ok=True)

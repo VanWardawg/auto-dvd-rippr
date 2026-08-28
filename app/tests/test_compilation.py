@@ -339,5 +339,58 @@ class CompilationAlwaysReviewedTests(unittest.TestCase):
     def test_an_ordinary_disc_still_flags_a_weak_match(self) -> None:
         self.assertTrue(self._map("full_season", 0.40)["needs_review"])
 
+
+class JobOwnDriveTests(unittest.TestCase):
+    """
+    Menu and OCR capture must only ever touch this job's own disc.
+
+    They took the first drive with media in it, whoever it belonged to. The TV
+    path ejects its disc the moment the rip finishes, to free the drive -- so
+    by mapping time "the first drive with media" was the other bay. A Minnie's
+    Pet Salon job ran ffmpeg against the disc being ripped in F:, which was the
+    wrong film's menu and a drive already saturated by an active rip. ffmpeg
+    timed out after five minutes and took the job down with it.
+    """
+
+    DRIVES = [
+        {"drive": "E:", "root": "E:\\", "has_media": False, "volume_label": ""},
+        {"drive": "F:", "root": "F:\\", "has_media": True, "volume_label": "OTHER_DISC"},
+    ]
+
+    def test_an_ejected_job_claims_no_disc(self) -> None:
+        # E: ejected after its rip; F: holds someone else's disc.
+        with patch.object(mapper, "discover_optical_drives", return_value=self.DRIVES):
+            self.assertIsNone(mapper._job_disc_root("E:"))
+
+    def test_it_never_borrows_the_other_drive(self) -> None:
+        with patch.object(mapper, "discover_optical_drives", return_value=self.DRIVES):
+            self.assertNotEqual(str(mapper._job_disc_root("E:") or ""), "F:\\")
+
+    def test_a_job_whose_disc_is_present_gets_it(self) -> None:
+        with patch.object(mapper, "discover_optical_drives", return_value=self.DRIVES):
+            self.assertEqual(str(mapper._job_disc_root("F:")), "F:\\")
+
+    def test_no_recorded_drive_means_no_disc(self) -> None:
+        with patch.object(mapper, "discover_optical_drives", return_value=self.DRIVES):
+            self.assertIsNone(mapper._job_disc_root(None))
+
+    def test_menu_vobs_are_not_taken_from_another_disc(self) -> None:
+        # The specific call that ran ffmpeg against the wrong drive.
+        with patch.object(mapper, "discover_optical_drives", return_value=self.DRIVES):
+            self.assertEqual(mapper._discover_dvd_menu_vobs("E:"), [])
+
+    def test_ocr_falls_back_to_the_ripped_file(self) -> None:
+        # With no disc to read, OCR should use the local rip -- which is fast,
+        # and unambiguously this job's content.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ripped = Path(tmp) / "A1_t00.mkv"
+            ripped.write_text("data")
+            with patch.object(mapper, "discover_optical_drives", return_value=self.DRIVES):
+                sources = mapper._build_ocr_source_candidates(str(ripped), "E:")
+            self.assertEqual(len(sources), 1)
+            self.assertEqual(sources[0]["kind"], "title")
+
 if __name__ == "__main__":
     unittest.main()
