@@ -2,7 +2,7 @@
 name = "autorippr-desktop"
 version = "0.1.0"
 description = "Auto-Ripper desktop frontend"
-authors = ["Kevin", "Copilot"]
+authors = ["Kevin", "Copilot", "Claude"]
 edition = "2021"
 
 [build-dependencies]
