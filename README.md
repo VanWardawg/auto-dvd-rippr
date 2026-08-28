@@ -9,6 +9,8 @@ NAS — resuming cleanly if anything is interrupted.
 
 > **Status:** active development, Windows-only for now. Expect rough edges.
 
+![Auto-Ripper mid-rip: pipeline stages, live throughput, and the activity log](docs/images/app-window.png)
+
 ---
 
 ## What it does
@@ -35,7 +37,8 @@ them. You need these installed before it can rip anything:
 | [MakeMKV](https://www.makemkv.com/) | **Yes** | Reads and decrypts discs. The free beta key works but expires periodically; Auto-Ripper warns you before it does. |
 | [ffmpeg / ffprobe](https://ffmpeg.org/download.html) | **Yes** | Probes title metadata and splits combined episodes. |
 | [TMDB API key](https://www.themoviedb.org/settings/api) | **Yes** | Identifies discs. Free for personal use. |
-| [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) | Optional | Reads DVD menus when the disc label is useless. |
+| [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) | Optional | Reads episode titles off DVD menus and title cards when the disc label is useless. |
+| [VLC](https://www.videolan.org/) | Optional | Captures DVD menu screenshots for that OCR when installed. |
 
 Auto-Ripper **does not redistribute MakeMKV or ffmpeg**. It detects them on
 first run and tells you what's missing.
@@ -68,11 +71,15 @@ in-app Settings tab.
 ### Command line
 
 The desktop app is a front end over a full CLI, which is useful for debugging
-and scripting:
+and scripting. From a source checkout:
 
 ```bash
-py -3.11 app/main.py --config app/config.json validate-config
+py -3.11 app/main.py --config "%APPDATA%\Auto-Ripper\config.json" validate-config
 ```
+
+An installed copy has the same CLI as
+`resourcesackendutorippr-backendutorippr-backend.exe` inside the
+install folder.
 
 See [`wiki/usage-cli.md`](wiki/usage-cli.md) for the full command reference.
 
@@ -102,8 +109,11 @@ npm run tauri -- dev
 Build a release installer:
 
 ```bash
-npm run build:self-contained && npm run tauri -- build
+npm run tauri -- build
 ```
+
+(The build regenerates the bundled Python backend automatically, so an
+installer can never ship a stale one.)
 
 This produces both an `.msi` and an NSIS `-setup.exe` under
 `src-tauri/target/release/bundle/`.

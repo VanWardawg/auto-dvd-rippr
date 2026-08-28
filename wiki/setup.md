@@ -1,6 +1,18 @@
 # Setup
 
-## 1) Prerequisites
+## Installed app (the normal path)
+
+Install from the [release installer](https://github.com/VanWardawg/auto-dvd-rippr/releases)
+and launch it. First run walks you through everything below: it auto-detects
+MakeMKV and ffmpeg where it can, asks for your TMDB key and folders, and
+validates the result. Configuration lands in `%APPDATA%\Auto-Ripper\config.json`
+and stays editable from the in-app Settings tab. **No Python required.**
+
+The rest of this page is for running the backend from a source checkout.
+
+## Source checkout
+
+### 1) Prerequisites
 
 - Windows 10/11
 - Python 3.11+
@@ -9,7 +21,7 @@
 - TMDB API key
 - NAS share path accessible from this machine
 
-## 2) Config
+### 2) Config
 
 1. Copy `app\config.example.json` to `app\config.json`.
 2. Fill values:
@@ -22,10 +34,10 @@
 3. Validate:
 
 ```powershell
-python app\main.py --config app\config.json validate-config
+py -3.11 app\main.py --config app\config.json validate-config
 ```
 
-## 3) Optional env overrides
+### 3) Optional env overrides
 
 These can override config file values:
 
