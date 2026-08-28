@@ -1184,18 +1184,24 @@ export default function App() {
       }
       await planSplits(jobId);
       // Confirming the assignments is the answer the job was waiting for, so
-      // it should carry on. Without this the job sat in `renaming` with
-      // nothing running and no indication that a further click was needed --
-      // it simply looked stuck.
-      let next = await getJobSnapshot(jobId);
-      // "mapping" belongs here too: a job held for review sits in mapping
-      // with awaiting_review set, and saving the review is the answer it was
-      // waiting for. Covering only renaming/splitting left exactly the held
-      // jobs stranded -- the ones most certain to be reviewed.
-      if (["mapping", "splitting", "renaming"].includes(next.job.status)) {
+      // it must carry on -- from mapping (where a held-for-review job sits)
+      // as well as splitting or renaming. The resume is keyed on the state we
+      // already know rather than a fresh snapshot fetch: gating it behind one
+      // more round-trip meant a single flaked fetch silently skipped the
+      // resume, and the error surfaced behind the modal while the modal
+      // re-presented itself asking to be saved again.
+      const statusBeforeSave = snapshot?.job.status;
+      if (
+        statusBeforeSave == null ||
+        ["mapping", "splitting", "renaming"].includes(statusBeforeSave)
+      ) {
         await resumePipeline(jobId);
-        next = await getJobSnapshot(jobId);
       }
+      // The review is finished: close the modal before the refresh, so a
+      // failure refreshing cannot leave a stale table asking to be saved.
+      setModal(null);
+      setModalJobId(null);
+      const next = await getJobSnapshot(jobId);
       setSnapshot(next);
       setGuidedReviewRows(buildGuidedReviewRows(next.rip_titles, next.episode_mappings));
       setGuidedSplitDrafts(buildGuidedSplitDrafts(next.split_plans));
