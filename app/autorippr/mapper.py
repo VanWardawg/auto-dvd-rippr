@@ -405,9 +405,20 @@ def set_mapping_override(
     episode_end: int,
     tmdb_episode_ids: list[int],
     reason: str,
+    season_number: int | None = None,
 ) -> dict[str, Any]:
+    """
+    Correct one title-to-episode assignment by hand.
+
+    `season_number` matters on a compilation, where the disc's episodes come
+    from all over the show. Without it the season was read from
+    job_selected_media -- which a compilation leaves NULL, so it fell back to
+    season 1 and looked the episode title up there, attaching a season 1 name
+    to a row sitting in season 3. Passing None keeps the row's own season,
+    which is the right answer for an ordinary disc.
+    """
     row = conn.execute(
-        "SELECT id, job_id FROM episode_mappings WHERE id = ?",
+        "SELECT id, job_id, season_number FROM episode_mappings WHERE id = ?",
         (mapping_id,),
     ).fetchone()
     if not row:
@@ -421,11 +432,15 @@ def set_mapping_override(
         """,
         (row["job_id"],),
     ).fetchone()
-    season_number = (
-        int(selected_media["season_number"])
-        if selected_media and selected_media["season_number"] is not None
-        else 1
-    )
+    if season_number is None:
+        # The row already knows its season; only fall back when it does not.
+        if row["season_number"] is not None:
+            season_number = int(row["season_number"])
+        elif selected_media and selected_media["season_number"] is not None:
+            season_number = int(selected_media["season_number"])
+        else:
+            season_number = 1
+    season_number = int(season_number)
     title_lookup: dict[int, str] = {}
     if selected_media:
         episodes = fetch_tmdb_tv_episodes(conn, cfg, int(selected_media["tmdb_id"]), season_number)
@@ -437,11 +452,13 @@ def set_mapping_override(
     conn.execute(
         """
         UPDATE episode_mappings
-        SET episode_start = ?, episode_end = ?, tmdb_episode_ids_json = ?, episode_titles_json = ?, reason = ?, manual_override = 1,
+        SET season_number = ?, episode_start = ?, episode_end = ?, tmdb_episode_ids_json = ?,
+            episode_titles_json = ?, reason = ?, manual_override = 1,
             needs_split = ?, confidence = ?
         WHERE id = ?
         """,
         (
+            season_number,
             episode_start,
             episode_end,
             json.dumps(tmdb_episode_ids, ensure_ascii=True),
@@ -456,13 +473,15 @@ def set_mapping_override(
         conn,
         row["job_id"],
         "INFO",
-        f"Mapping override set on mapping_id={mapping_id} to E{episode_start}-E{episode_end}",
+        f"Mapping override set on mapping_id={mapping_id} to "
+        f"S{season_number:02d}E{episode_start}-E{episode_end}",
         None,
         None,
     )
     conn.commit()
     return {
         "mapping_id": mapping_id,
+        "season_number": season_number,
         "episode_start": episode_start,
         "episode_end": episode_end,
         "tmdb_episode_ids": tmdb_episode_ids,

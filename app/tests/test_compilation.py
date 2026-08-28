@@ -488,5 +488,106 @@ class MappingRerunRespectsReviewTests(unittest.TestCase):
         job = self._run(needs_review=False)
         self.assertEqual(job["status"], "renaming")
 
+
+class CrossSeasonOverrideTests(unittest.TestCase):
+    """
+    Correcting an episode by hand has to be able to name its season.
+
+    set_mapping_override read the season from job_selected_media, which a
+    compilation leaves NULL, so it fell back to season 1 and looked the episode
+    title up there. Correcting a row that sits in season 3 would have written a
+    season 1 title onto it -- and the guided review has no season field at all,
+    so that was the only correction path available.
+    """
+
+    def _job_with_mapping(self, conn, row_season: int):
+        import json as _json
+        from autorippr.state import create_job
+
+        job_id = create_job(conn, disc_label="D", media_type="tv", disc_scope="compilation")
+        conn.execute(
+            "INSERT INTO job_selected_media (job_id, media_type, tmdb_id, title, season_number, created_at, updated_at) "
+            "VALUES (?,?,?,?,NULL,?,?)",
+            (job_id, "tv", 3934, "Show", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+        rip_id = conn.execute(
+            "INSERT INTO rip_titles (job_id, title_id, duration_seconds, source_file) VALUES (?,?,?,?)",
+            (job_id, 0, 1440.0, "t00.mkv"),
+        ).lastrowid
+        mapping_id = conn.execute(
+            """
+            INSERT INTO episode_mappings (
+                job_id, rip_title_id, season_number, episode_start, episode_end,
+                tmdb_episode_ids_json, episode_titles_json, confidence, reason,
+                manual_override, needs_split
+            ) VALUES (?,?,?,?,?,?,?,?,?,0,0)
+            """,
+            (job_id, rip_id, row_season, 1, 1, "[]", _json.dumps(["Wrong"]), 0.35, "guess"),
+        ).lastrowid
+        conn.commit()
+        return mapping_id
+
+    def _conn(self):
+        import tempfile
+        from autorippr.db import open_db
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        conn = open_db(str(Path(tmp.name) / "a.db"))
+        self.addCleanup(conn.close)
+        return conn
+
+    def _override(self, conn, mapping_id, season):
+        episodes = [{"episode_number": 12, "id": 999, "name": "Sea Captain Mickey"}]
+        with patch.object(mapper, "fetch_tmdb_tv_episodes", return_value=episodes):
+            return mapper.set_mapping_override(
+                conn, None, mapping_id,
+                episode_start=12, episode_end=12,
+                tmdb_episode_ids=[999], reason="test",
+                season_number=season,
+            )
+
+    def test_an_episode_can_be_moved_to_another_season(self) -> None:
+        conn = self._conn()
+        mapping_id = self._job_with_mapping(conn, row_season=1)
+        self._override(conn, mapping_id, season=4)
+        row = conn.execute(
+            "SELECT season_number, episode_start FROM episode_mappings WHERE id = ?", (mapping_id,)
+        ).fetchone()
+        self.assertEqual((row["season_number"], row["episode_start"]), (4, 12))
+
+    def test_the_title_comes_from_the_season_given(self) -> None:
+        # The specific corruption: a season 1 title on a season 4 row.
+        import json as _json
+
+        conn = self._conn()
+        mapping_id = self._job_with_mapping(conn, row_season=1)
+        self._override(conn, mapping_id, season=4)
+        titles = _json.loads(
+            conn.execute(
+                "SELECT episode_titles_json FROM episode_mappings WHERE id = ?", (mapping_id,)
+            ).fetchone()["episode_titles_json"]
+        )
+        self.assertEqual(titles, ["Sea Captain Mickey"])
+
+    def test_omitting_the_season_keeps_the_row_where_it_is(self) -> None:
+        # An ordinary disc never passes one, and must not be moved to season 1.
+        conn = self._conn()
+        mapping_id = self._job_with_mapping(conn, row_season=3)
+        self._override(conn, mapping_id, season=None)
+        row = conn.execute(
+            "SELECT season_number FROM episode_mappings WHERE id = ?", (mapping_id,)
+        ).fetchone()
+        self.assertEqual(row["season_number"], 3)
+
+    def test_an_override_is_recorded_as_certain(self) -> None:
+        conn = self._conn()
+        mapping_id = self._job_with_mapping(conn, row_season=1)
+        self._override(conn, mapping_id, season=4)
+        row = conn.execute(
+            "SELECT confidence, manual_override FROM episode_mappings WHERE id = ?", (mapping_id,)
+        ).fetchone()
+        self.assertEqual((row["confidence"], row["manual_override"]), (1.0, 1))
+
 if __name__ == "__main__":
     unittest.main()

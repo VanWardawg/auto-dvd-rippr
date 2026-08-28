@@ -652,6 +652,12 @@ def build_parser() -> argparse.ArgumentParser:
     mapping_override.add_argument("mapping_id", type=int)
     mapping_override.add_argument("episode_start", type=int)
     mapping_override.add_argument("episode_end", type=int)
+    mapping_override.add_argument(
+        "--season",
+        type=int,
+        default=None,
+        help="Season this episode belongs to; needed on a compilation, which spans seasons",
+    )
     mapping_ignore = mapping_sub.add_parser("ignore", help="Mark a mapping row as ignored/extras")
     mapping_ignore.add_argument("mapping_id", type=int)
     mapping_source = mapping_sub.add_parser("source-override", help="Set manual mapping source file override")
@@ -1184,7 +1190,7 @@ def main() -> int:
 
         if args.mapping_command == "override":
             mapping_row = conn.execute(
-                "SELECT job_id FROM episode_mappings WHERE id = ? LIMIT 1",
+                "SELECT job_id, season_number FROM episode_mappings WHERE id = ? LIMIT 1",
                 (args.mapping_id,),
             ).fetchone()
             if not mapping_row:
@@ -1203,11 +1209,20 @@ def main() -> int:
             if not selected_media:
                 print("Selected media not found for mapping override.", file=sys.stderr)
                 return 7
+            # Which season to resolve the episode numbers against. On a
+            # compilation the job has no season of its own, so the fallback
+            # here was always 1 -- meaning an override on a season 3 row looked
+            # its episodes up in season 1 and attached that season's titles.
+            override_season = getattr(args, "season", None)
+            if override_season is None:
+                override_season = mapping_row["season_number"]
+            if override_season is None:
+                override_season = selected_media["season_number"] or 1
             season_episodes = fetch_tmdb_tv_episodes(
                 conn,
                 cfg,
                 int(selected_media["tmdb_id"]),
-                int(selected_media["season_number"] or 1),
+                int(override_season),
             )
             selected_numbers = list(range(args.episode_start, args.episode_end + 1))
             eps = [
@@ -1226,6 +1241,7 @@ def main() -> int:
                 episode_end=args.episode_end,
                 tmdb_episode_ids=eps,
                 reason="manual_override_cli",
+                season_number=int(override_season),
             )
             print(json.dumps(payload, indent=2))
             return 0
