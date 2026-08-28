@@ -1155,7 +1155,15 @@ export default function App() {
         );
       }
       await planSplits(jobId);
-      const next = await getJobSnapshot(jobId);
+      // Confirming the assignments is the answer the job was waiting for, so
+      // it should carry on. Without this the job sat in `renaming` with
+      // nothing running and no indication that a further click was needed --
+      // it simply looked stuck.
+      let next = await getJobSnapshot(jobId);
+      if (next.job.status === "renaming" || next.job.status === "splitting") {
+        await resumePipeline(jobId);
+        next = await getJobSnapshot(jobId);
+      }
       setSnapshot(next);
       setGuidedReviewRows(buildGuidedReviewRows(next.rip_titles, next.episode_mappings));
       setGuidedSplitDrafts(buildGuidedSplitDrafts(next.split_plans));
