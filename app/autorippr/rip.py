@@ -372,6 +372,33 @@ def execute_rip_job(
     }
 
 
+
+def _expected_title_count_from_logs(conn, job_id: str) -> int | None:
+    """
+    How many titles the most recent rip planned to produce, from the job log.
+
+    The selection plan is not persisted anywhere else, but it is always
+    logged -- "Title selection: Selected 5 episode title(s) of 6." or
+    "Title selection: All 5 title(s) look like episode content." -- and the
+    most recent entry belongs to the rip being recovered. None means the plan
+    is unknown, in which case recovery falls back to its other checks rather
+    than refusing outright.
+    """
+    row = conn.execute(
+        """
+        SELECT message FROM job_logs
+        WHERE job_id = ? AND message LIKE 'Title selection:%'
+        ORDER BY id DESC LIMIT 1
+        """,
+        (job_id,),
+    ).fetchone()
+    if not row:
+        return None
+    message = str(row["message"] or "")
+    match = re.search(r"Selected (\d+)", message) or re.search(r"All (\d+) title", message)
+    return int(match.group(1)) if match else None
+
+
 def recover_completed_rip(conn, cfg: AppConfig, job_id: str) -> dict[str, Any] | None:
     job_root = Path(cfg.staging_root) / "jobs" / job_id
     rip_output_dir = job_root / "rip_output"
@@ -385,6 +412,29 @@ def recover_completed_rip(conn, cfg: AppConfig, job_id: str) -> dict[str, Any] |
 
     mkv_files = sorted(rip_output_dir.glob("*.mkv"))
     if not mkv_files:
+        return None
+
+    # "Copy complete." is written per makemkvcon invocation, and a multi-title
+    # rip runs one invocation per title -- so a pipeline killed *between*
+    # titles leaves a log whose last invocation finished cleanly. One title of
+    # five looked exactly like a completed rip, was recovered as such, and the
+    # job sailed on to mapping with four episodes missing. The planned count
+    # is in the job log; a recovery that cannot account for every planned
+    # title is not a recovery.
+    expected = _expected_title_count_from_logs(conn, job_id)
+    if expected is not None and len(mkv_files) < expected:
+        append_job_log(
+            conn=conn,
+            job_id=job_id,
+            level="WARNING",
+            message=(
+                f"Not recovering a partial rip: {len(mkv_files)} of {expected} "
+                "planned title(s) present. The disc will be re-ripped."
+            ),
+            from_status=None,
+            to_status=None,
+        )
+        conn.commit()
         return None
 
     disc_info_path = log_dir / "makemkv_disc_info.log"

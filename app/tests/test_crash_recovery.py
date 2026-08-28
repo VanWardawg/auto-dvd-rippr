@@ -392,3 +392,71 @@ class SupersededIdentifyTests(unittest.TestCase):
                 self.assertFalse(pipeline._job_is_still_identifying(conn, "no-such-job"))
             finally:
                 conn.close()
+
+
+class PartialSetRecoveryTests(unittest.TestCase):
+    """
+    A recovery that cannot account for every planned title is not a recovery.
+
+    "Copy complete." is written per makemkvcon invocation, and a multi-title
+    rip runs one invocation per title. A pipeline killed between titles leaves
+    a log whose last invocation finished cleanly -- so one complete title of a
+    planned five looked exactly like a finished rip. A real Avatar disc was
+    recovered with 1 of 5 episodes and sent on to mapping.
+    """
+
+    def _conn_with_log(self, message: str | None):
+        conn = open_db(":memory:")
+        self.addCleanup(conn.close)
+        job_id = create_job(conn, disc_label="D", media_type="tv")
+        if message:
+            from autorippr.state import append_job_log
+
+            append_job_log(conn, job_id, "INFO", message, None, None)
+            conn.commit()
+        return conn, job_id
+
+    def test_the_planned_count_is_read_from_the_log(self) -> None:
+        from autorippr.rip import _expected_title_count_from_logs
+
+        conn, job_id = self._conn_with_log("Title selection: Selected 5 episode title(s) of 6.")
+        self.assertEqual(_expected_title_count_from_logs(conn, job_id), 5)
+
+    def test_the_rip_everything_wording_counts_too(self) -> None:
+        from autorippr.rip import _expected_title_count_from_logs
+
+        conn, job_id = self._conn_with_log("Title selection: All 5 title(s) look like episode content.")
+        self.assertEqual(_expected_title_count_from_logs(conn, job_id), 5)
+
+    def test_no_selection_log_means_unknown(self) -> None:
+        # Unknown falls back to the other checks rather than refusing outright.
+        from autorippr.rip import _expected_title_count_from_logs
+
+        conn, job_id = self._conn_with_log(None)
+        self.assertIsNone(_expected_title_count_from_logs(conn, job_id))
+
+    def test_a_partial_set_is_not_recovered(self) -> None:
+        from autorippr import rip as rip_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = build_config(root)
+            conn = open_db(cfg.db_path)
+            try:
+                from autorippr.state import append_job_log
+
+                job_id = create_job(conn, disc_label="D", media_type="tv")
+                append_job_log(conn, job_id, "INFO",
+                               "Title selection: Selected 5 episode title(s) of 6.", None, None)
+                conn.commit()
+                job_root = root / "jobs" / job_id
+                (job_root / "rip_output").mkdir(parents=True)
+                (job_root / "logs").mkdir(parents=True)
+                # One cleanly finished title: its invocation wrote the marker.
+                (job_root / "rip_output" / "F1_t00.mkv").write_text("data")
+                (job_root / "logs" / "makemkv.log").write_text(
+                    'MSG:5037,516,2,"Copy complete. 1 titles saved, 0 failed."\n', encoding="utf-8"
+                )
+                self.assertIsNone(rip_module.recover_completed_rip(conn, cfg, job_id))
+            finally:
+                conn.close()
