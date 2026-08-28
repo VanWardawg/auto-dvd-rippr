@@ -52,6 +52,12 @@ target the waiting, not the compute.
 
 ## Next up (found by running the app on real discs)
 
+- **Verify positional episode assignments with OCR.** When title count matches
+  the stated range, the in-order path assigns positionally and never consults
+  names -- an off-by-one range reaches the NAS unchallenged at 0.90. OCR
+  verification needs care with two-part episode names ("The Day of Black Sun
+  (1)" vs "(2)" are nearly identical strings).
+
 - **Show rip throughput, and warn when it is pathological.** A disc reading at
   1x logs no errors and never stalls, so every current health check passes
   while a 75-minute film takes 84 minutes. Measured 4.8x vs 1.05x on two
