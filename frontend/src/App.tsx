@@ -1188,7 +1188,11 @@ export default function App() {
       // nothing running and no indication that a further click was needed --
       // it simply looked stuck.
       let next = await getJobSnapshot(jobId);
-      if (next.job.status === "renaming" || next.job.status === "splitting") {
+      // "mapping" belongs here too: a job held for review sits in mapping
+      // with awaiting_review set, and saving the review is the answer it was
+      // waiting for. Covering only renaming/splitting left exactly the held
+      // jobs stranded -- the ones most certain to be reviewed.
+      if (["mapping", "splitting", "renaming"].includes(next.job.status)) {
         await resumePipeline(jobId);
         next = await getJobSnapshot(jobId);
       }
