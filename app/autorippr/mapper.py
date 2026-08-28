@@ -37,6 +37,13 @@ class EpisodeTarget:
     # episode_mappings has always stored the season per row -- it was simply
     # given the same value every time.
     season_number: int = 1
+    # Whether this episode is inside the user's stated disc range, as opposed
+    # to the slack window around it. Slack episodes exist so a name match can
+    # correct a near-miss range; they must never be handed out positionally.
+    # When they counted the same as core episodes, a five-title disc with a
+    # nine-episode window failed every count check and fell into the duration
+    # heuristic, which read each 24-minute episode as a double bill.
+    in_core_range: bool = True
 
 
 
@@ -310,7 +317,17 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
         # still keeping the list short enough to be useful.
         low = max(1, range_start - RANGE_SLACK_EPISODES)
         high = range_end + RANGE_SLACK_EPISODES
-        widened = [t for t in targets if low <= t.episode_number <= high]
+        widened = [
+            EpisodeTarget(
+                episode_number=t.episode_number,
+                tmdb_episode_id=t.tmdb_episode_id,
+                title=t.title,
+                season_number=t.season_number,
+                in_core_range=range_start <= t.episode_number <= range_end,
+            )
+            for t in targets
+            if low <= t.episode_number <= high
+        ]
         targets = widened or [
             t for t in targets if range_start <= t.episode_number <= range_end
         ]
@@ -600,6 +617,24 @@ def set_mapping_ignore(
     }
 
 
+
+def _take_core_targets(remaining: list[EpisodeTarget], count: int) -> list[EpisodeTarget]:
+    """
+    Hand out the next `count` in-range episodes, removing them from `remaining`.
+
+    Positional assignment must never reach into the slack window: those
+    episodes are only there so a *name* match can correct a near-miss range.
+    Falls back to whatever is left only when no core episodes remain, because
+    returning nothing would crash the caller.
+    """
+    core = [t for t in remaining if t.in_core_range]
+    pool = core if core else remaining
+    taken = pool[:count] if pool else []
+    for target in taken:
+        remaining.remove(target)
+    return taken
+
+
 def _plan_mappings(
     rip_rows,
     targets: list[EpisodeTarget],
@@ -621,7 +656,8 @@ def _plan_mappings(
         row for row in rip_rows
         if int(row["id"]) not in play_all_ids and int(row["id"]) not in assigned_by_rip_id
     ]
-    in_order_primary_rows = _select_in_order_primary_episode_rows(unassigned_rows, len(remaining))
+    core_remaining = [t for t in remaining if t.in_core_range]
+    in_order_primary_rows = _select_in_order_primary_episode_rows(unassigned_rows, len(core_remaining))
     in_order_primary_ids = {int(row["id"]) for row in in_order_primary_rows}
 
     for r in rip_rows:
@@ -679,8 +715,7 @@ def _plan_mappings(
                     }
                 )
                 continue
-            assigned = remaining[:1]
-            remaining = remaining[1:]
+            assigned = _take_core_targets(remaining, 1)
             episodes_for_title = 1
             output.append(
                 {
@@ -757,13 +792,13 @@ def _plan_mappings(
                 del remaining[start_idx : start_idx + 1]
                 episodes_for_title = 1
         else:
+            core_left = [t for t in remaining if t.in_core_range]
             if dur <= 0:
                 episodes_for_title = 1
             else:
                 episodes_for_title = max(1, int(round(dur / (12 * 60))))
-                episodes_for_title = min(4, episodes_for_title, len(remaining))
-            assigned = remaining[:episodes_for_title]
-            remaining = remaining[episodes_for_title:]
+                episodes_for_title = min(4, episodes_for_title, max(1, len(core_left)))
+            assigned = _take_core_targets(remaining, episodes_for_title)
 
         reason_parts = []
         if menu_match:
@@ -824,6 +859,9 @@ def _plan_mappings(
             }
         )
 
+    # Slack episodes that nothing claimed were never expected on this disc;
+    # only unclaimed core episodes are worth reporting as missing.
+    remaining = [t for t in remaining if t.in_core_range]
     if remaining:
         # unmatched episodes means unresolved mapping confidence drops globally
         missing = ", ".join(str(ep.episode_number) for ep in remaining)

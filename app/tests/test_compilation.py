@@ -633,5 +633,85 @@ class PartialRangeSlackTests(unittest.TestCase):
     def test_a_range_past_the_end_yields_what_exists(self) -> None:
         self.assertEqual(self._filtered(20, 24), [18, 19, 20, 21])
 
+
+class RangeSlackPositionalTests(unittest.TestCase):
+    """
+    Slack episodes are for name matches only; position must never hand one out.
+
+    The slack window was added so a near-miss range could still reach the right
+    episode by name. But the widened list also fed the planner's count checks:
+    a five-title Avatar disc with range 11-15 saw nine candidates, failed the
+    "titles match episode count" gate, and fell into the duration heuristic --
+    which divides by 12 minutes and read every 24-minute episode as a double
+    bill, with needs_split set. The splitter would have cut single episodes in
+    half.
+    """
+
+    def _rows(self, count=5):
+        return [
+            {
+                "id": i + 1, "title_id": i, "duration_seconds": 24.5 * 60,
+                "chapter_count": 6, "source_file": f"t{i:02d}.mkv",
+                "raw_metadata_json": None,
+            }
+            for i in range(count)
+        ]
+
+    def _targets(self, low=9, high=17, core=(11, 15)):
+        return [
+            EpisodeTarget(
+                episode_number=n, tmdb_episode_id=1000 + n, title=f"Ep {n}",
+                season_number=3, in_core_range=core[0] <= n <= core[1],
+            )
+            for n in range(low, high + 1)
+        ]
+
+    def _plan(self, targets, ocr=None):
+        with patch.object(mapper, "_derive_cached_bundle_assignments", return_value={}), \
+             patch.object(mapper, "_identify_likely_play_all_titles", return_value=set()), \
+             patch.object(mapper, "_find_best_menu_match", return_value=None), \
+             patch.object(mapper, "_should_try_ocr_menu_fallback", return_value=ocr is not None), \
+             patch.object(mapper, "_find_best_ocr_menu_match",
+                          side_effect=ocr or (lambda **k: {"match": None})):
+            return mapper._plan_mappings(self._rows(), targets, None, "job", None)
+
+    def test_the_avatar_disc_shape_maps_one_episode_per_title(self) -> None:
+        planned = [p for p in self._plan(self._targets()) if p["rip_title_id"] is not None]
+        self.assertEqual([p["episode_start"] for p in planned], [11, 12, 13, 14, 15])
+        self.assertEqual([p["episode_end"] for p in planned], [11, 12, 13, 14, 15])
+        self.assertFalse(any(p["needs_split"] for p in planned))
+
+    def test_unclaimed_slack_episodes_are_not_reported_missing(self) -> None:
+        # E9, E10, E16, E17 were never expected on this disc.
+        planned = self._plan(self._targets())
+        leftover = [p for p in planned if p["rip_title_id"] is None]
+        self.assertEqual(leftover, [])
+
+    def test_a_name_match_can_still_reach_a_slack_episode(self) -> None:
+        # The reason the slack exists: the disc really starts one early, and
+        # OCR reads the true episode off the screen. Note the asymmetry this
+        # test pins down: when title count exactly matches the stated range,
+        # the in-order fast path assigns positionally and never consults OCR
+        # at all -- which is how an off-by-one disc range went to the NAS
+        # unchallenged at 0.90. Names are only consulted when the counts
+        # disagree, so this scenario uses a 4-episode range under 5 titles.
+        calls = {"n": 0}
+
+        def fake_ocr(**kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                remaining = kwargs["targets"]
+                idx = next(i for i, t in enumerate(remaining) if t.episode_number == 10)
+                return {"match": {"score": 0.95, "index": idx},
+                        "artifact_image_path": None, "artifact_text_path": None,
+                        "best_score": 0.95, "source_label": "test", "source_kind": "title"}
+            return {"match": None, "artifact_image_path": None,
+                    "artifact_text_path": None, "best_score": None, "source_label": None}
+
+        targets = self._targets(low=9, high=16, core=(11, 14))
+        planned = [p for p in self._plan(targets, ocr=fake_ocr)
+                   if p["rip_title_id"] is not None]
+        self.assertIn(10, [p["episode_start"] for p in planned])
+
 if __name__ == "__main__":
     unittest.main()
