@@ -149,8 +149,14 @@ fn main() {
         .expect("error while running tauri application");
 }
 
+// Commands that shell out to the Python CLI (or PowerShell) are `async fn` on
+// purpose: a synchronous Tauri command runs on the main thread, and the window
+// cannot pump events while one waits on a child process -- every button that
+// touched the backend froze the whole UI for the length of a Python startup,
+// and "refresh disc" for as long as the drive took to spin up. Async commands
+// run on the async runtime's worker pool instead.
 #[tauri::command]
-fn list_jobs() -> Result<Vec<JobSummary>, String> {
+async fn list_jobs() -> Result<Vec<JobSummary>, String> {
     let value = run_python_json(&["job", "list"])?;
     let jobs = value
         .get("jobs")
@@ -162,14 +168,14 @@ fn list_jobs() -> Result<Vec<JobSummary>, String> {
 }
 
 #[tauri::command]
-fn get_runtime_config_state() -> Result<RuntimeConfigState, String> {
+async fn get_runtime_config_state() -> Result<RuntimeConfigState, String> {
     let runtime = resolve_runtime_paths()?;
     let config = read_runtime_config_json(&runtime.config_path)?;
     Ok(build_runtime_config_state(&runtime.config_path, &config))
 }
 
 #[tauri::command]
-fn save_runtime_config(config: Value) -> Result<RuntimeConfigState, String> {
+async fn save_runtime_config(config: Value) -> Result<RuntimeConfigState, String> {
     let runtime = resolve_runtime_paths()?;
     let object = config
         .as_object()
@@ -181,7 +187,7 @@ fn save_runtime_config(config: Value) -> Result<RuntimeConfigState, String> {
 }
 
 #[tauri::command]
-fn autodetect_runtime_config() -> Result<RuntimeConfigState, String> {
+async fn autodetect_runtime_config() -> Result<RuntimeConfigState, String> {
     let runtime = resolve_runtime_paths()?;
     let mut config = read_runtime_config_json(&runtime.config_path)?;
     let object = config
@@ -199,22 +205,27 @@ fn autodetect_runtime_config() -> Result<RuntimeConfigState, String> {
 }
 
 #[tauri::command]
-fn browse_file_path(title: String, initial_path: Option<String>) -> Result<Option<String>, String> {
+async fn browse_file_path(title: String, initial_path: Option<String>) -> Result<Option<String>, String> {
     browse_windows_path(title, initial_path, false)
 }
 
 #[tauri::command]
-fn browse_directory_path(title: String, initial_path: Option<String>) -> Result<Option<String>, String> {
+async fn browse_directory_path(title: String, initial_path: Option<String>) -> Result<Option<String>, String> {
     browse_windows_path(title, initial_path, true)
 }
 
 #[tauri::command]
-fn job_snapshot(job_id: String) -> Result<Value, String> {
+async fn job_snapshot(job_id: String) -> Result<Value, String> {
     run_python_json(&["job", "snapshot", &job_id])
 }
 
 #[tauri::command]
-fn list_disc_drives() -> Result<Vec<DiscDrive>, String> {
+async fn list_disc_drives() -> Result<Vec<DiscDrive>, String> {
+    list_disc_drives_blocking()
+}
+
+// Shared with detect_disc_for_drive, which is plain synchronous code.
+fn list_disc_drives_blocking() -> Result<Vec<DiscDrive>, String> {
     let value = run_python_json(&["rip", "drives"])?;
     let drives = value
         .get("drives")
@@ -227,12 +238,12 @@ fn list_disc_drives() -> Result<Vec<DiscDrive>, String> {
 }
 
 #[tauri::command]
-fn detect_disc(preferred_drive: Option<String>) -> Result<Option<DiscDrive>, String> {
+async fn detect_disc(preferred_drive: Option<String>) -> Result<Option<DiscDrive>, String> {
     detect_disc_for_drive(preferred_drive)
 }
 
 #[tauri::command]
-fn start_pipeline(request: StartJobRequest) -> Result<String, String> {
+async fn start_pipeline(request: StartJobRequest) -> Result<String, String> {
     let mut create_args: Vec<String> = vec![
         "job".into(),
         "create".into(),
@@ -284,7 +295,7 @@ fn start_pipeline(request: StartJobRequest) -> Result<String, String> {
 }
 
 fn detect_disc_for_drive(preferred_drive: Option<String>) -> Result<Option<DiscDrive>, String> {
-    let drives = list_disc_drives()?;
+    let drives = list_disc_drives_blocking()?;
     if let Some(preferred) = preferred_drive {
         let normalized = preferred.trim().to_ascii_uppercase();
         if let Some(match_drive) = drives
@@ -303,27 +314,27 @@ fn detect_disc_for_drive(preferred_drive: Option<String>) -> Result<Option<DiscD
 }
 
 #[tauri::command]
-fn resume_pipeline(job_id: String) -> Result<(), String> {
+async fn resume_pipeline(job_id: String) -> Result<(), String> {
     spawn_python_background(&["pipeline", "run", &job_id])
 }
 
 #[tauri::command]
-fn analyze_menu(job_id: String) -> Result<(), String> {
+async fn analyze_menu(job_id: String) -> Result<(), String> {
     spawn_python_background(&["mapping", "analyze-menu", &job_id])
 }
 
 #[tauri::command]
-fn rerun_mapping(job_id: String) -> Result<(), String> {
+async fn rerun_mapping(job_id: String) -> Result<(), String> {
     spawn_python_background(&["mapping", "run", &job_id])
 }
 
 #[tauri::command]
-fn rerun_identify(job_id: String) -> Result<(), String> {
+async fn rerun_identify(job_id: String) -> Result<(), String> {
     spawn_python_background(&["tmdb", "identify", &job_id])
 }
 
 #[tauri::command]
-fn search_tmdb_candidates(job_id: String, query: String) -> Result<(), String> {
+async fn search_tmdb_candidates(job_id: String, query: String) -> Result<(), String> {
     let _ = run_python_text(&["tmdb", "search", &job_id, &query])?;
     Ok(())
 }
@@ -335,13 +346,13 @@ fn search_tmdb_candidates(job_id: String, query: String) -> Result<(), String> {
 /// series -- so the user has to be able to look the real show up before the
 /// rip starts, not after it has already gone wrong.
 #[tauri::command]
-fn search_tv_shows(query: String) -> Result<Value, String> {
+async fn search_tv_shows(query: String) -> Result<Value, String> {
     run_python_json(&["tmdb", "show-search", &query])
 }
 
 /// A show's seasons with episode counts, and a suggested range for this disc.
 #[tauri::command]
-fn get_tv_show_seasons(
+async fn get_tv_show_seasons(
     tmdb_id: i64,
     disc_number: Option<i64>,
     discs_in_set: Option<i64>,
@@ -361,7 +372,7 @@ fn get_tv_show_seasons(
 }
 
 #[tauri::command]
-fn select_tmdb_candidate(job_id: String, media_type: String, tmdb_id: i64, slot_index: Option<i64>) -> Result<(), String> {
+async fn select_tmdb_candidate(job_id: String, media_type: String, tmdb_id: i64, slot_index: Option<i64>) -> Result<(), String> {
     let resume_job_id = job_id.clone();
     let mut args = vec![
         "tmdb".to_string(),
@@ -381,7 +392,7 @@ fn select_tmdb_candidate(job_id: String, media_type: String, tmdb_id: i64, slot_
 }
 
 #[tauri::command]
-fn override_mapping(
+async fn override_mapping(
     mapping_id: i64,
     episode_start: i64,
     episode_end: i64,
@@ -412,7 +423,7 @@ fn override_mapping(
 }
 
 #[tauri::command]
-fn override_mapping_source(mapping_id: i64, rip_title_id: i64) -> Result<(), String> {
+async fn override_mapping_source(mapping_id: i64, rip_title_id: i64) -> Result<(), String> {
     let _ = run_python_text(&[
         "mapping",
         "source-override",
@@ -423,7 +434,7 @@ fn override_mapping_source(mapping_id: i64, rip_title_id: i64) -> Result<(), Str
 }
 
 #[tauri::command]
-fn ignore_mapping(mapping_id: i64) -> Result<(), String> {
+async fn ignore_mapping(mapping_id: i64) -> Result<(), String> {
     let _ = run_python_text(&[
         "mapping",
         "ignore",
@@ -433,7 +444,7 @@ fn ignore_mapping(mapping_id: i64) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn override_split(split_plan_id: i64, start: Option<f64>, end: Option<f64>) -> Result<(), String> {
+async fn override_split(split_plan_id: i64, start: Option<f64>, end: Option<f64>) -> Result<(), String> {
     let mut args = vec![
         "split".to_string(),
         "override".to_string(),
@@ -453,13 +464,13 @@ fn override_split(split_plan_id: i64, start: Option<f64>, end: Option<f64>) -> R
 }
 
 #[tauri::command]
-fn plan_splits(job_id: String) -> Result<(), String> {
+async fn plan_splits(job_id: String) -> Result<(), String> {
     let _ = run_python_text(&["split", "plan", &job_id])?;
     Ok(())
 }
 
 #[tauri::command]
-fn update_job_profile(
+async fn update_job_profile(
     job_id: String,
     disc_scope: String,
     season_number: Option<i64>,
@@ -491,29 +502,29 @@ fn update_job_profile(
 }
 
 #[tauri::command]
-fn cancel_job(job_id: String) -> Result<(), String> {
+async fn cancel_job(job_id: String) -> Result<(), String> {
     let _ = run_python_text(&["job", "cancel", &job_id])?;
     Ok(())
 }
 
 #[tauri::command]
-fn clear_local_artifacts(job_id: String) -> Result<(), String> {
+async fn clear_local_artifacts(job_id: String) -> Result<(), String> {
     spawn_python_background(&["job", "clear-local", &job_id])
 }
 
 #[tauri::command]
-fn rebuild_output(job_id: String) -> Result<(), String> {
+async fn rebuild_output(job_id: String) -> Result<(), String> {
     spawn_python_background(&["job", "rebuild-output", &job_id])
 }
 
 #[tauri::command]
-fn remap_remote_output(job_id: String) -> Result<(), String> {
+async fn remap_remote_output(job_id: String) -> Result<(), String> {
     let _ = run_python_text(&["job", "remap-remote", &job_id])?;
     Ok(())
 }
 
 #[tauri::command]
-fn delete_job(job_id: String) -> Result<(), String> {
+async fn delete_job(job_id: String) -> Result<(), String> {
     let _ = run_python_text(&["job", "delete", &job_id])?;
     Ok(())
 }
@@ -534,17 +545,17 @@ fn set_window_theme(window: tauri::Window, theme: String) -> Result<(), String> 
 }
 
 #[tauri::command]
-fn reclaimable_space() -> Result<Value, String> {
+async fn reclaimable_space() -> Result<Value, String> {
     run_python_json(&["job", "reclaimable"])
 }
 
 #[tauri::command]
-fn reclaim_completed() -> Result<Value, String> {
+async fn reclaim_completed() -> Result<Value, String> {
     run_python_json(&["job", "reclaim-all"])
 }
 
 #[tauri::command]
-fn open_path(path: String) -> Result<(), String> {
+async fn open_path(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         Command::new("cmd")
