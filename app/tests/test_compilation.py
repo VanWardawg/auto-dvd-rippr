@@ -713,5 +713,58 @@ class RangeSlackPositionalTests(unittest.TestCase):
                    if p["rip_title_id"] is not None]
         self.assertIn(10, [p["episode_start"] for p in planned])
 
+
+class TypicalEpisodeLengthTests(unittest.TestCase):
+    """
+    The duration fallback divided by a flat 12 minutes, so every 24-minute
+    episode read as a double bill with needs_split set -- on a disc where all
+    five titles were visibly the same length. The disc's own median title
+    length is the right divisor: on an episode disc most titles are single
+    episodes, so the median is one episode even when a couple are doubles.
+    """
+
+    def _rows(self, minutes):
+        return [
+            {"id": i + 1, "title_id": i, "duration_seconds": m * 60,
+             "chapter_count": 6, "source_file": f"t{i:02d}.mkv", "raw_metadata_json": None}
+            for i, m in enumerate(minutes)
+        ]
+
+    def test_a_uniform_disc_reads_as_singles(self) -> None:
+        self.assertAlmostEqual(
+            mapper._typical_episode_seconds(self._rows([24.5, 24.5, 24.5, 24.5, 24.5])),
+            24.5 * 60,
+        )
+
+    def test_a_double_length_title_still_reads_as_two(self) -> None:
+        typical = mapper._typical_episode_seconds(self._rows([24.5, 24.5, 49.0, 24.5]))
+        self.assertEqual(max(1, round(49.0 * 60 / typical)), 2)
+
+    def test_the_median_shrugs_off_an_outlier(self) -> None:
+        # A stray play-all that escaped detection must not drag the estimate.
+        typical = mapper._typical_episode_seconds(self._rows([24.5, 24.5, 24.5, 24.5, 122.0]))
+        self.assertAlmostEqual(typical, 24.5 * 60)
+
+    def test_an_unmeasurable_disc_falls_back_sanely(self) -> None:
+        self.assertEqual(mapper._typical_episode_seconds(self._rows([2.0, 3.0])), 22.0 * 60)
+
+    def test_avatar_disc_three_no_longer_pairs_up(self) -> None:
+        # The full planner path, exactly as the disc presented it: five
+        # 24.5-minute titles, range 11-15 with slack, no name matches.
+        targets = [
+            EpisodeTarget(episode_number=n, tmdb_episode_id=1000 + n, title=f"Ep {n}",
+                          season_number=3, in_core_range=11 <= n <= 15)
+            for n in range(9, 18)
+        ]
+        with patch.object(mapper, "_derive_cached_bundle_assignments", return_value={}), \
+             patch.object(mapper, "_identify_likely_play_all_titles", return_value=set()), \
+             patch.object(mapper, "_find_best_menu_match", return_value=None), \
+             patch.object(mapper, "_should_try_ocr_menu_fallback", return_value=False):
+            planned = mapper._plan_mappings(
+                self._rows([24.5] * 5), targets, None, "job", None)
+        mapped = [p for p in planned if p["rip_title_id"] is not None]
+        self.assertEqual([p["episode_start"] for p in mapped], [11, 12, 13, 14, 15])
+        self.assertFalse(any(p["needs_split"] for p in mapped))
+
 if __name__ == "__main__":
     unittest.main()

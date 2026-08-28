@@ -618,6 +618,26 @@ def set_mapping_ignore(
 
 
 
+
+def _typical_episode_seconds(rows) -> float:
+    """
+    One episode's length on this disc, taken from the disc itself.
+
+    The median of the full-length titles: on an episode disc most titles are
+    single episodes, so the median is one episode even when a couple of titles
+    are doubles. Falls back to 22 minutes only when the disc offers nothing to
+    measure.
+    """
+    durations = sorted(
+        float(r["duration_seconds"] or 0)
+        for r in rows
+        if float(r["duration_seconds"] or 0) >= 10 * 60
+    )
+    if not durations:
+        return 22.0 * 60
+    return durations[len(durations) // 2]
+
+
 def _take_core_targets(remaining: list[EpisodeTarget], count: int) -> list[EpisodeTarget]:
     """
     Hand out the next `count` in-range episodes, removing them from `remaining`.
@@ -658,6 +678,7 @@ def _plan_mappings(
     ]
     core_remaining = [t for t in remaining if t.in_core_range]
     in_order_primary_rows = _select_in_order_primary_episode_rows(unassigned_rows, len(core_remaining))
+    typical_episode_seconds = _typical_episode_seconds(unassigned_rows)
     in_order_primary_ids = {int(row["id"]) for row in in_order_primary_rows}
 
     for r in rip_rows:
@@ -796,7 +817,13 @@ def _plan_mappings(
             if dur <= 0:
                 episodes_for_title = 1
             else:
-                episodes_for_title = max(1, int(round(dur / (12 * 60))))
+                # Measured against this disc's own typical title length, not a
+                # hardcoded runtime. The old divisor was a flat 12 minutes,
+                # which read every 24-minute episode as a double bill and set
+                # needs_split on all of them -- the splitter would have cut
+                # single episodes in half. A disc of uniform titles is its own
+                # best evidence for what one episode looks like.
+                episodes_for_title = max(1, int(round(dur / typical_episode_seconds)))
                 episodes_for_title = min(4, episodes_for_title, max(1, len(core_left)))
             assigned = _take_core_targets(remaining, episodes_for_title)
 
