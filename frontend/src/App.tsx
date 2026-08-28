@@ -79,12 +79,23 @@ import type { DiscDrive, EpisodeMapping, JobLog, JobSnapshot, JobStatus, JobSumm
 
 const POLL_MS = 3000;
 
+/**
+ * Inline activity spinner. Now that backend commands run off the main thread,
+ * the window no longer freezes while they work -- which also means nothing
+ * visibly happens until they finish. Every waiting moment needs to look like
+ * one.
+ */
+function Spinner() {
+  return <span className="spinner" aria-hidden="true" />;
+}
+
 type QuickAction = {
   key: string;
   label: string;
   onClick: () => void;
   disabled: boolean;
   tone?: "default" | "danger";
+  busy?: boolean;
 };
 
 
@@ -572,7 +583,14 @@ export default function App() {
     };
   }, [configReady, configState?.makemkvStatus?.level, configState?.makemkvStatus?.message]);
 
+  const [refreshingCardId, setRefreshingCardId] = useState<string | null>(null);
+
   async function refreshDriveCard(cardId: string) {
+    // Drive detection takes as long as the disc takes to spin up, and until
+    // now the button gave no sign anything was happening -- and a second
+    // click started a second detection.
+    if (refreshingCardId !== null) return;
+    setRefreshingCardId(cardId);
     try {
       const drives = await listDiscDrives();
       setDiscDrives(drives);
@@ -597,6 +615,8 @@ export default function App() {
       setError(null);
     } catch (err) {
       setError(String(err));
+    } finally {
+      setRefreshingCardId(null);
     }
   }
 
@@ -872,24 +892,28 @@ export default function App() {
         key: "resume",
         label: "Resume",
         disabled,
+        busy: busyAction === "Resume",
         onClick: () => runSelectedAction("Resume", resumePipeline),
       },
       {
         key: "analyze-menu",
         label: "Analyze DVD Menu",
         disabled,
+        busy: busyAction === "Analyze Menu",
         onClick: () => runSelectedAction("Analyze Menu", analyzeMenu),
       },
       {
         key: "rerun-mapping",
         label: "Re-run Mapping",
         disabled,
+        busy: busyAction === "Re-map",
         onClick: () => runSelectedAction("Re-map", rerunMapping),
       },
       {
         key: "rerun-identify",
         label: "Re-run TMDB",
         disabled,
+        busy: busyAction === "Re-identify",
         onClick: () => runSelectedAction("Re-identify", rerunIdentify),
       },
       {
@@ -942,18 +966,21 @@ export default function App() {
         label: "Cancel Job",
         disabled,
         tone: "danger",
+        busy: busyAction === "Cancel job",
         onClick: () => runSelectedAction("Cancel job", cancelJob),
       },
       {
         key: "clear-local",
         label: localArtifactSize ? `Free ${localArtifactSize}` : "Clear Local Artifacts",
         disabled,
+        busy: busyAction === "Clear local artifacts",
         onClick: () => runSelectedAction("Clear local artifacts", clearLocalArtifacts),
       },
       {
         key: "rebuild-output",
         label: "Rebuild Outputs",
         disabled,
+        busy: busyAction === "Rebuild outputs",
         onClick: () => runSelectedAction("Rebuild outputs", rebuildOutput),
       },
       {
@@ -969,6 +996,7 @@ export default function App() {
         key: "remap-remote",
         label: "Remap Remote to TMDB",
         disabled,
+        busy: busyAction === "Remap remote output",
         onClick: () => runSelectedAction("Remap remote output", remapRemoteOutput),
       });
     }
@@ -1223,7 +1251,17 @@ export default function App() {
         <div className="sidebar-header">
           <div>
             <h1>Auto-Ripper</h1>
-            <p>{configReady ? "Ready" : "Setup required"}</p>
+            <p aria-live="polite">
+              {busyAction ? (
+                <>
+                  <Spinner /> {busyAction}
+                </>
+              ) : configReady ? (
+                "Ready"
+              ) : (
+                "Setup required"
+              )}
+            </p>
           </div>
           <div className="toolbar-actions">
             <button
@@ -1348,10 +1386,11 @@ export default function App() {
                       <button
                         type="button"
                         aria-label={`Refresh disc in drive ${index + 1}`}
-                        disabled={!configReady}
+                        disabled={!configReady || refreshingCardId !== null}
                         onClick={() => void refreshDriveCard(card.id)}
                       >
-                        Refresh Disc
+                        {refreshingCardId === card.id ? <Spinner /> : null}
+                        {refreshingCardId === card.id ? "Reading disc" : "Refresh Disc"}
                       </button>
                     </label>
                     <label>
@@ -1661,6 +1700,9 @@ export default function App() {
                       })
                     }
                   >
+                    {busyAction === `Starting pipeline (${card.form.opticalDrive ?? `Drive ${index + 1}`})` ? (
+                      <Spinner />
+                    ) : null}
                     Start End-to-End
                   </button>
                   {card.continuousStatus ? <p className="continuous-status">{card.continuousStatus}</p> : null}
@@ -1792,6 +1834,7 @@ export default function App() {
                     disabled={action.disabled}
                     onClick={action.onClick}
                   >
+                    {action.busy ? <Spinner /> : null}
                     {action.label}
                   </button>
                 ))}
@@ -1812,6 +1855,7 @@ export default function App() {
                           disabled={action.disabled}
                           onClick={action.onClick}
                         >
+                          {action.busy ? <Spinner /> : null}
                           {action.label}
                         </button>
                       ))}
@@ -2638,6 +2682,7 @@ export default function App() {
                         disabled={busyAction !== null || guidedReviewRows.some((row) => row.status === "map" && (!row.episodeStart || !row.episodeEnd))}
                         onClick={() => void saveGuidedReviewAssignments()}
                       >
+                        {busyAction === "Save guided review" ? <Spinner /> : null}
                         Save file assignments
                       </button>
                     </div>

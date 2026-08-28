@@ -1693,3 +1693,33 @@ input::placeholder {
 .guided-review-season {
   width: 4.5rem;
 }
+
+/* ---- Activity spinner -----------------------------------------------------
+   Backend commands run off the main thread now, so the window no longer
+   freezes while they work -- which also means nothing visibly happens until
+   they finish. The spinner is that missing sign of life: inline, colored by
+   the text it sits beside, shown on the button that started the work and in
+   the header line naming the action. */
+
+.spinner {
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  margin-right: 0.4em;
+  vertical-align: -0.1em;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spinner-turn 0.7s linear infinite;
+}
+
+@keyframes spinner-turn {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+    opacity: 0.55;
+  }
+}
