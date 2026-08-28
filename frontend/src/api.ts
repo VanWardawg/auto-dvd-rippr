@@ -95,8 +95,18 @@ export async function selectMovieSlotCandidate(
   return invoke("select_tmdb_candidate", { jobId, mediaType: "movie", tmdbId, slotIndex });
 }
 
-export async function overrideMapping(mappingId: number, episodeStart: number, episodeEnd: number): Promise<void> {
-  return invoke("override_mapping", { mappingId, episodeStart, episodeEnd });
+export async function overrideMapping(
+  mappingId: number,
+  episodeStart: number,
+  episodeEnd: number,
+  seasonNumber?: number | null,
+): Promise<void> {
+  return invoke("override_mapping", {
+    mappingId,
+    episodeStart,
+    episodeEnd,
+    seasonNumber: seasonNumber ?? null,
+  });
 }
 
 export async function overrideMappingSource(mappingId: number, ripTitleId: number): Promise<void> {

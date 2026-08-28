@@ -38,6 +38,8 @@ export interface DiscDrive {
 export interface EpisodeMapping {
   id: number;
   rip_title_id?: number | null;
+  /** Per row, because a compilation disc draws from several seasons. */
+  season_number?: number | null;
   title_id?: number | null;
   source_file?: string | null;
   episode_start?: number | null;

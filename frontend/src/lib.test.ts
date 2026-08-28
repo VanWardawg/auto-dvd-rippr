@@ -16,6 +16,7 @@ import {
   MOVIE_PIPELINE_STAGES,
   TV_PIPELINE_STAGES,
   buildConfigDraft,
+  buildGuidedReviewRows,
   coerceConfigDraft,
   episodeLabel,
   fileNameFromPath,
@@ -497,5 +498,45 @@ describe("book and volume labels", () => {
 
   it("claims nothing from a book with no number", () => {
     expect(seasonFromLabel("THE_JUNGLE_BOOK")).toBeNull();
+  });
+});
+
+describe("guided review rows carry a season", () => {
+  // The draft had only episodeStart/episodeEnd, so a compilation row sitting
+  // in season 3 could not be corrected without silently moving to season 1.
+  const ripTitles = [
+    { id: 1, source_file: "A1_t00.mkv", duration_seconds: 1440, chapter_count: 6 },
+    { id: 2, source_file: "A1_t01.mkv", duration_seconds: 1440, chapter_count: 6 },
+  ] as never[];
+
+  it("seeds each row from its own mapping", () => {
+    const rows = buildGuidedReviewRows(ripTitles, [
+      { id: 10, rip_title_id: 1, season_number: 3, episode_start: 12, episode_end: 12 },
+      { id: 11, rip_title_id: 2, season_number: 1, episode_start: 1, episode_end: 1 },
+    ] as never[]);
+    expect(rows.map((r) => r.seasonNumber)).toEqual(["3", "1"]);
+  });
+
+  it("keeps two rows from one disc in different seasons", () => {
+    // The whole point: one compilation disc, several seasons.
+    const rows = buildGuidedReviewRows(ripTitles, [
+      { id: 10, rip_title_id: 1, season_number: 4, episode_start: 8, episode_end: 8 },
+      { id: 11, rip_title_id: 2, season_number: 2, episode_start: 33, episode_end: 33 },
+    ] as never[]);
+    expect(new Set(rows.map((r) => r.seasonNumber))).toEqual(new Set(["4", "2"]));
+  });
+
+  it("leaves the season blank when the mapping has none", () => {
+    // Blank means "leave it where it is", which is what an ordinary disc wants.
+    const rows = buildGuidedReviewRows(ripTitles, [
+      { id: 10, rip_title_id: 1, episode_start: 1, episode_end: 1 },
+    ] as never[]);
+    expect(rows[0].seasonNumber).toBe("");
+  });
+
+  it("an unmapped file still produces a usable row", () => {
+    const rows = buildGuidedReviewRows(ripTitles, [] as never[]);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].status).toBe("ignore");
   });
 });

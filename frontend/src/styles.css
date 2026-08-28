@@ -1687,3 +1687,9 @@ input::placeholder {
   width: auto;
   margin: 0;
 }
+
+/* The season is only editable on discs whose episodes span seasons, but the
+   column is always present so the table shape does not shift between jobs. */
+.guided-review-season {
+  width: 4.5rem;
+}

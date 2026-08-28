@@ -27,6 +27,9 @@ export type GuidedReviewRowDraft = {
   ripTitleId: string;
   sourceFile: string;
   status: "map" | "ignore";
+  // A compilation's episodes come from across the show, so the season is part
+  // of the answer rather than a property of the job.
+  seasonNumber: string;
   episodeStart: string;
   episodeEnd: string;
   durationMinutes: string;
@@ -90,6 +93,7 @@ export function buildGuidedReviewRows(ripTitles: RipTitle[], mappings: EpisodeMa
       ripTitleId: String(ripTitle.id),
       sourceFile: ripTitle.source_file,
       status: mapping?.episode_start == null ? "ignore" : "map",
+      seasonNumber: mapping?.season_number != null ? String(mapping.season_number) : "",
       episodeStart: mapping?.episode_start != null ? String(mapping.episode_start) : "",
       episodeEnd: mapping?.episode_end != null ? String(mapping.episode_end) : "",
       durationMinutes: ripTitle.duration_seconds ? (ripTitle.duration_seconds / 60).toFixed(1) : "—",

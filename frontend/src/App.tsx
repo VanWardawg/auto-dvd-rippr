@@ -1149,6 +1149,9 @@ export default function App() {
           Number(row.mappingId),
           Number(row.episodeStart),
           Number(row.episodeEnd),
+          // Blank means "leave it where it is", which is what an ordinary
+          // disc wants; a compilation needs the season named explicitly.
+          row.seasonNumber === "" ? null : Number(row.seasonNumber),
         );
       }
       await planSplits(jobId);
@@ -2643,6 +2646,7 @@ export default function App() {
                             <th>Ch</th>
                             <th>Confidence</th>
                             <th>Assignment</th>
+                            <th>Season</th>
                             <th>Episode start</th>
                             <th>Episode end</th>
                             <th>Reason</th>
@@ -2683,6 +2687,23 @@ export default function App() {
                                   <option value="map">Episodes</option>
                                   <option value="ignore">Ignore / Extras</option>
                                 </select>
+                              </td>
+                              <td>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  className="guided-review-season"
+                                  value={row.seasonNumber}
+                                  disabled={row.status === "ignore"}
+                                  placeholder="s"
+                                  onChange={(e) =>
+                                    setGuidedReviewRows((current) => current.map((candidate) => (
+                                      candidate.ripTitleId === row.ripTitleId
+                                        ? { ...candidate, seasonNumber: e.target.value }
+                                        : candidate
+                                    )))
+                                  }
+                                />
                               </td>
                               <td>
                                 <select

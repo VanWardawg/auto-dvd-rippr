@@ -381,7 +381,26 @@ fn select_tmdb_candidate(job_id: String, media_type: String, tmdb_id: i64, slot_
 }
 
 #[tauri::command]
-fn override_mapping(mapping_id: i64, episode_start: i64, episode_end: i64) -> Result<(), String> {
+fn override_mapping(
+    mapping_id: i64,
+    episode_start: i64,
+    episode_end: i64,
+    season_number: Option<i64>,
+) -> Result<(), String> {
+    // A compilation's episodes come from all over the show, so a correction
+    // there has to name its season; omitting it keeps the row where it is.
+    if let Some(season) = season_number {
+        let _ = run_python_text(&[
+            "mapping",
+            "override",
+            &mapping_id.to_string(),
+            &episode_start.to_string(),
+            &episode_end.to_string(),
+            "--season",
+            &season.to_string(),
+        ])?;
+        return Ok(());
+    }
     let _ = run_python_text(&[
         "mapping",
         "override",
