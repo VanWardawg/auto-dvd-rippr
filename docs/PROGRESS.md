@@ -70,6 +70,47 @@ target the waiting, not the compute.
   `job_progress` row behind, so the UI can briefly show stale rip progress.
   Cosmetic.
 
+### 2026-08-27 — the first compilation discs, and five bugs on the way
+
+Both Minnie discs are ripped and mapped. Minnie's Pet Salon produced five
+episodes drawn from four different seasons, including its own namesake
+(S04E08), each matched by OCR reading the episode title card off the ripped
+video at score 1.00. That is the case the compilation scope exists for and the
+old single-season model could not express at all.
+
+Getting there took five fixes.
+
+**A progress heartbeat killed a rip.** One job entered mapping and held the
+write lock; the other was twenty minutes into a healthy rip committing progress
+every second, and its commit exceeded the busy timeout. The exception
+propagated out of the rip loop and killed the process, orphaning MakeMKV.
+Telemetry can no longer abort the work it reports on, and an unreadable
+database is no longer read as a cancellation.
+
+**Menu and OCR capture read whatever disc was loaded.** They took the first
+drive with media in it. The TV path ejects its own disc as soon as the rip
+finishes, so by mapping time that was the other bay -- a Pet Salon job ran
+ffmpeg against the disc being ripped in F:, which was the wrong film's menu and
+a drive saturated by an active rip. It timed out after five minutes and took
+the job down. Disc access is now scoped to the job's own drive, and falls back
+to the local ripped file, which is a better source than another film's menu in
+every respect.
+
+**A guess scored like a match.** Rows whose own reason read "could not find a
+confident episode title match" were scoring 0.84, from duration alone, beside
+genuine 0.97 name matches. Duration says how big a file is, never which episode
+it holds; on a compilation nothing supplies the identity. Those now score 0.35.
+
+**Re-running mapping skipped the review it had just asked for.** The handler
+advanced the job whenever mapping produced rows, never reading needs_review,
+and transition_job clears awaiting_review on the way past. Both compilation
+discs were pushed towards the NAS carrying unidentified assignments.
+
+**Compilations always pause for confirmation**, because position is evidence on
+an ordinary disc and noise on one of these.
+
+331 backend tests, 63 frontend.
+
 ### 2026-08-27 — the TV path had never once run
 
 Both Minnie compilation discs failed the instant they started:
