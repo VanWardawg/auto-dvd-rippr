@@ -70,6 +70,25 @@ target the waiting, not the compute.
   `job_progress` row behind, so the UI can briefly show stale rip progress.
   Cosmetic.
 
+### 2026-08-28 — the UI freeze
+
+Every Tauri command was a synchronous fn, and synchronous commands run on the
+main thread -- the thread that pumps the window's event loop. Every command
+shells out to a child process (a Python interpreter at minimum; PowerShell
+with WinForms for the Browse dialogs; a drive spin-up for disc detection), so
+every backend-touching button froze the entire window for the child's
+lifetime. All subprocess commands are async now and run on the worker pool;
+only set_window_theme, which touches the window handle, stays on the main
+thread.
+
+Also from live use: the guided review's save button now resumes the pipeline
+(a reviewed job previously sat in `renaming` forever, looking stuck), a
+slightly-wrong partial-season range no longer hides the right episode from
+the name match (Avatar disc 2 was off by one for five episodes -- renamed in
+place on the NAS), and `job rebuild-output` refuses to run when the staged
+rip is gone, because clearing outputs deletes the NAS copies and a reclaimed
+job has nothing left to rebuild them from.
+
 ### 2026-08-27 — the first compilation discs, and five bugs on the way
 
 Both Minnie discs are ripped and mapped. Minnie's Pet Salon produced five
