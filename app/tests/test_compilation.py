@@ -392,5 +392,52 @@ class JobOwnDriveTests(unittest.TestCase):
             self.assertEqual(len(sources), 1)
             self.assertEqual(sources[0]["kind"], "title")
 
+
+class GuessConfidenceTests(unittest.TestCase):
+    """
+    A guess must not score like a match.
+
+    Both Minnie discs produced rows at 0.84 whose own reason line read "OCR
+    fallback could not find a confident episode title match". That number came
+    from duration alone -- a 24-minute file read as two 12-minute episodes --
+    and sat in the review list beside genuine 0.97 name matches looking just as
+    settled. Duration says how big a file is, never which episode it holds.
+    """
+
+    def _confidence(self, *, matched: bool, position_is_evidence: bool) -> float:
+        return mapper._confidence_for_assignment(
+            duration_seconds=24 * 60,
+            episode_count=2,
+            menu_match_score=1.0 if matched else None,
+            position_is_evidence=position_is_evidence,
+        )
+
+    def test_a_real_name_match_still_scores_high(self) -> None:
+        # The OCR read the title card off the video: that is real evidence.
+        self.assertGreaterEqual(self._confidence(matched=True, position_is_evidence=False), 0.9)
+
+    def test_a_compilation_guess_scores_low(self) -> None:
+        self.assertLess(self._confidence(matched=False, position_is_evidence=False), 0.5)
+
+    def test_an_ordinary_disc_still_trusts_position(self) -> None:
+        # Title 3 really is usually episode 3, so duration that fits is
+        # genuinely reassuring there.
+        self.assertGreater(self._confidence(matched=False, position_is_evidence=True), 0.7)
+
+    def test_a_guess_ranks_below_a_match(self) -> None:
+        # The property that matters in the review list.
+        guess = self._confidence(matched=False, position_is_evidence=False)
+        match = self._confidence(matched=True, position_is_evidence=False)
+        self.assertLess(guess, match)
+
+    def test_an_unmeasurable_file_scores_lowest(self) -> None:
+        self.assertLessEqual(
+            mapper._confidence_for_assignment(
+                duration_seconds=0, episode_count=1, menu_match_score=None,
+                position_is_evidence=False,
+            ),
+            0.2,
+        )
+
 if __name__ == "__main__":
     unittest.main()

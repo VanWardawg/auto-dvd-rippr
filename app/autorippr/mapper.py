@@ -299,7 +299,10 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
             )
 
     _clear_downstream_state_for_remap(conn, cfg, job_id)
-    planned = _plan_mappings(rip_rows, targets, cfg, job_id, _job_disc_drive(conn, job_id))
+    planned = _plan_mappings(
+        rip_rows, targets, cfg, job_id, _job_disc_drive(conn, job_id),
+        position_is_evidence=disc_scope_early != "compilation",
+    )
     # Rows are built at several points in the planner, so the season is derived
     # here from the episodes each row actually claims rather than threaded
     # through every one of them. For a normal disc every target shares a
@@ -563,6 +566,7 @@ def _plan_mappings(
     cfg: AppConfig,
     job_id: str,
     disc_drive: str | None = None,
+    position_is_evidence: bool = True,
 ) -> list[dict[str, Any]]:
     remaining = targets[:]
     output: list[dict[str, Any]] = []
@@ -765,6 +769,7 @@ def _plan_mappings(
             menu_match_score=(
                 menu_match["score"] if menu_match else (ocr_match["score"] if ocr_match else None)
             ),
+            position_is_evidence=position_is_evidence,
         )
         output.append(
             {
@@ -1145,7 +1150,18 @@ def _confidence_for_assignment(
     duration_seconds: float,
     episode_count: int,
     menu_match_score: float | None,
+    position_is_evidence: bool = True,
 ) -> float:
+    """
+    How much to trust one title-to-episode assignment.
+
+    Duration says how *big* a file is, never *which* episode it holds. On an
+    ordinary disc position supplies the identity -- title 3 is episode 3 -- so
+    a duration that fits is genuinely reassuring. On a compilation nothing
+    supplies it, and a duration-derived 0.84 sat next to a real 0.97 name match
+    in the review list looking equally settled, while its own reason line said
+    "could not find a confident episode title match".
+    """
     if menu_match_score is not None:
         if menu_match_score >= 0.90:
             return 0.97
@@ -1153,6 +1169,9 @@ def _confidence_for_assignment(
             return 0.90
         if menu_match_score >= 0.70:
             return 0.82
+    if not position_is_evidence:
+        # Nothing identified this episode; only its length is known.
+        return 0.35 if duration_seconds > 0 else 0.2
     if duration_seconds <= 0:
         return 0.45
     per_ep = duration_seconds / max(episode_count, 1) / 60.0
