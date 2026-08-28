@@ -766,5 +766,45 @@ class TypicalEpisodeLengthTests(unittest.TestCase):
         self.assertEqual([p["episode_start"] for p in mapped], [11, 12, 13, 14, 15])
         self.assertFalse(any(p["needs_split"] for p in mapped))
 
+
+class PlayAllDetectionTests(unittest.TestCase):
+    """
+    A play-all runs the other episodes back to back, so its length is the sum
+    of theirs -- that arithmetic is the evidence, not the filename. The old
+    check demanded an A-prefixed name (a1_t05), but the letter is MakeMKV's
+    source-group label: a real 122-minute play-all named e1_t05 sailed through
+    and was mapped as an episode.
+    """
+
+    def _rows(self, spec):
+        return [
+            {"id": i + 1, "title_id": i, "duration_seconds": m * 60,
+             "chapter_count": 6, "source_file": f"{name}.mkv", "raw_metadata_json": None}
+            for i, (name, m) in enumerate(spec)
+        ]
+
+    def test_the_avatar_play_all_is_caught_despite_its_name(self) -> None:
+        rows = self._rows([("f1_t00", 24.5), ("f2_t01", 24.5), ("c3_t02", 24.5),
+                           ("d1_t03", 24.5), ("d2_t04", 24.2), ("e1_t05", 122.3)])
+        self.assertEqual(mapper._identify_likely_play_all_titles(rows), {6})
+
+    def test_the_legacy_prefix_rule_still_works(self) -> None:
+        # A duration outlier whose sum does not line up, but named a1_*.
+        rows = self._rows([("a1_t00", 22.0), ("a1_t01", 22.0), ("a1_t02", 90.0)])
+        self.assertEqual(mapper._identify_likely_play_all_titles(rows), {3})
+
+    def test_a_long_feature_beside_shorts_is_not_a_play_all(self) -> None:
+        # A 30-minute special next to four 24-minute episodes sums nowhere
+        # near, and must stay an episode -- Minnie's Pet Salon's exact shape.
+        rows = self._rows([("a1_t00", 30.1), ("a1_t01", 24.0), ("a1_t02", 24.1),
+                           ("a1_t03", 24.0), ("a1_t04", 24.0)])
+        self.assertEqual(mapper._identify_likely_play_all_titles(rows), set())
+
+    def test_a_double_feature_disc_is_left_alone(self) -> None:
+        # Two 90-minute specials each equal the other's "sum", but a sum of
+        # one is not a sum -- flagging both would exclude the entire disc.
+        rows = self._rows([("a1_t00", 90.0), ("b1_t01", 90.0)])
+        self.assertEqual(mapper._identify_likely_play_all_titles(rows), set())
+
 if __name__ == "__main__":
     unittest.main()

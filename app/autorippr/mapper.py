@@ -1366,15 +1366,42 @@ def _should_try_ocr_menu_fallback(menu_name: str | None) -> bool:
 
 
 def _identify_likely_play_all_titles(rip_rows) -> set[int]:
+    """
+    Titles that replay the whole disc rather than holding one episode.
+
+    The strongest evidence is arithmetic: a play-all runs the other episodes
+    back to back, so its length is the sum of theirs. A 122-minute title on a
+    disc of five 24-minute episodes is the play-all, whatever its filename.
+
+    The old check additionally demanded an A-prefixed filename (a1_t05), but
+    that letter is MakeMKV's source-group label and says nothing about
+    play-all-ness -- an e1_t05 play-all sailed through, got treated as an
+    episode, and swallowed a slack candidate. The filename rule survives only
+    as a fallback for duration outliers whose sum does not line up.
+    """
     durations = [float(r["duration_seconds"]) for r in rip_rows if r["duration_seconds"] is not None]
     if len(durations) < 2:
         return set()
     sorted_durations = sorted(durations)
     median = sorted_durations[len(sorted_durations) // 2]
     longest = max(durations)
+    full_lengths = [d for d in durations if d >= 10 * 60]
+    full_length_sum = sum(full_lengths)
+
     result: set[int] = set()
     for r in rip_rows:
         dur = float(r["duration_seconds"] or 0.0)
+        if dur < 45 * 60:
+            continue
+        # The rest of the disc's full-length content, without this title. A
+        # sum of one is not a sum: two 90-minute specials each equal the
+        # other's "total", and flagging both would exclude the entire disc.
+        is_full = dur >= 10 * 60
+        others = full_length_sum - dur if is_full else full_length_sum
+        others_count = len(full_lengths) - (1 if is_full else 0)
+        if others_count >= 2 and others >= 20 * 60 and 0.85 <= (dur / others) <= 1.15:
+            result.add(int(r["id"]))
+            continue
         source_file = Path(str(r["source_file"] or ""))
         stem = source_file.stem.lower()
         if (
