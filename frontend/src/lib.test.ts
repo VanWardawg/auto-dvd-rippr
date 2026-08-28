@@ -472,3 +472,30 @@ describe("the chosen show reaches the job", () => {
     expect(out.tmdbShowId ?? null).toBeNull();
   });
 });
+
+describe("book and volume labels", () => {
+  // AVATAR_BK3_VOL1: neither token was recognised, so a four-disc season set
+  // produced no season, no disc number, and no suggested episode range.
+  it("reads a book as a season", () => {
+    expect(seasonFromLabel("AVATAR_BK3_VOL1")).toBe(3);
+    expect(seasonFromLabel("AVATAR_BOOK_3_VOLUME_4")).toBe(3);
+  });
+
+  it("reads a volume as a disc", () => {
+    expect(discNumberFromLabel("AVATAR_BK3_VOL1")).toBe(1);
+    expect(discNumberFromLabel("AVATAR_BK3_VOL2")).toBe(2);
+  });
+
+  it("keeps both out of the search", () => {
+    expect(showQueryFromLabel("AVATAR_BK3_VOL1")).toBe("avatar");
+  });
+
+  it("agrees with the backend on all four discs", () => {
+    expect([1, 2, 3, 4].map((n) => discNumberFromLabel(`AVATAR_BK3_VOL${n}`))).toEqual([1, 2, 3, 4]);
+    expect([1, 2, 3, 4].map((n) => seasonFromLabel(`AVATAR_BK3_VOL${n}`))).toEqual([3, 3, 3, 3]);
+  });
+
+  it("claims nothing from a book with no number", () => {
+    expect(seasonFromLabel("THE_JUNGLE_BOOK")).toBeNull();
+  });
+});

@@ -497,6 +497,8 @@ def _normalize_query(text: str, preserve_numbers: bool = False) -> str:
     # THE_WINGFEATHER_SAGA_S1 searched TMDB for "the wingfeather saga s1",
     # which returns nothing, so the job stopped and waited for a human -- and
     # every SHOW_S2_D1 label has the same problem.
+    t = re.sub(r"\bbo?o?k\s*\d{1,2}\b", " ", t)
+    t = re.sub(r"\bvol(?:ume)?\s*\d{1,2}\b", " ", t)
     t = re.sub(r"\bs\s?\d{1,2}\b", " ", t)
     t = re.sub(r"\bd\s?\d{1,2}\b", " ", t)
     t = re.sub(r"\bs\d{1,2}\s?e\d{1,3}\b", " ", t)
@@ -531,6 +533,9 @@ def _extract_season(text: str) -> int | None:
     flattened = re.sub(r"[_\-\.]+", " ", text)
     patterns = [
         r"(?i)\bseason\s*(\d{1,2})\b",
+        # Avatar and much anime number their seasons as books: AVATAR_BK3_VOL1
+        # is season 3, and nothing here recognised it.
+        r"(?i)\bbo?o?k\s*(\d{1,2})\b",
         r"(?i)\bs(\d{1,2})\s?e\d{1,3}\b",
         r"(?i)\bs\s?(\d{1,2})\b",
     ]
@@ -552,7 +557,12 @@ def _extract_disc_number(text: str) -> int | None:
     if not text:
         return None
     flattened = re.sub(r"[_\-\.]+", " ", text)
-    for pattern in (r"(?i)\bdis[ck]\s*(\d{1,2})\b", r"(?i)\bd\s?(\d{1,2})\b"):
+    for pattern in (
+        r"(?i)\bdis[ck]\s*(\d{1,2})\b",
+        # "Volume" means one disc of a set on most TV releases.
+        r"(?i)\bvol(?:ume)?\s*(\d{1,2})\b",
+        r"(?i)\bd\s?(\d{1,2})\b",
+    ):
         m = re.search(pattern, flattened)
         if m:
             return int(m.group(1))

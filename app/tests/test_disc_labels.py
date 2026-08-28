@@ -242,3 +242,38 @@ class EpisodeRangeSuggestionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BookAndVolumeLabelTests(unittest.TestCase):
+    """
+    Avatar's discs are labelled AVATAR_BK3_VOL1: book 3, volume 1.
+
+    Neither token was recognised, so a four-disc season set produced no season
+    and no disc number, and the episode range could not be suggested at all.
+    """
+
+    def test_a_book_is_a_season(self) -> None:
+        # Avatar and much anime number seasons as books.
+        self.assertEqual(parse_disc_hints("AVATAR_BK3_VOL1").detected_season, 3)
+        self.assertEqual(parse_disc_hints("AVATAR_BOOK_3_VOLUME_4").detected_season, 3)
+
+    def test_a_volume_is_a_disc(self) -> None:
+        self.assertEqual(parse_disc_hints("AVATAR_BK3_VOL1").detected_disc, 1)
+        self.assertEqual(parse_disc_hints("AVATAR_BK3_VOL2").detected_disc, 2)
+        self.assertEqual(parse_disc_hints("AVATAR_BOOK_3_VOLUME_4").detected_disc, 4)
+
+    def test_neither_reaches_the_search_query(self) -> None:
+        self.assertEqual(tv_query("AVATAR_BK3_VOL1"), "avatar")
+
+    def test_the_four_discs_differ_only_by_volume(self) -> None:
+        hints = [parse_disc_hints(f"AVATAR_BK3_VOL{n}") for n in (1, 2, 3, 4)]
+        self.assertEqual({h.detected_season for h in hints}, {3})
+        self.assertEqual([h.detected_disc for h in hints], [1, 2, 3, 4])
+
+    def test_the_existing_conventions_still_work(self) -> None:
+        self.assertEqual(parse_disc_hints("MICKEY_MOUSE_CLUBHOUSE_S2_D3").detected_season, 2)
+        self.assertEqual(parse_disc_hints("MICKEY_MOUSE_CLUBHOUSE_S2_D3").detected_disc, 3)
+
+    def test_a_book_in_a_title_is_not_a_season(self) -> None:
+        # "The Jungle Book" has no digit after it, so nothing is claimed.
+        self.assertIsNone(parse_disc_hints("THE_JUNGLE_BOOK").detected_season)

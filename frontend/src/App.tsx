@@ -99,13 +99,22 @@ type ShowLookupState = {
   query: string;
   results: TvShowResult[] | null;
   detail: TvShowDetail | null;
+  discNumber: number | null;
   discsInSet: number | null;
   busy: boolean;
   error: string | null;
 };
 
 function emptyLookup(query: string): ShowLookupState {
-  return { query, results: null, detail: null, discsInSet: null, busy: false, error: null };
+  return {
+    query,
+    results: null,
+    detail: null,
+    discNumber: null,
+    discsInSet: null,
+    busy: false,
+    error: null,
+  };
 }
 
 export default function App() {
@@ -182,9 +191,10 @@ export default function App() {
     discsInSet: number | null,
   ) => {
     const season = detail.seasons.find((entry) => entry.season_number === seasonNumber);
-    const range = season
-      ? suggestEpisodeRange(season.episode_count, discNumberFromLabel(card.form.discLabel), discsInSet)
-      : null;
+    const lookupState = lookupFor(card);
+    // What the user typed wins over what the label happened to say.
+    const discNumber = lookupState.discNumber ?? discNumberFromLabel(card.form.discLabel);
+    const range = season ? suggestEpisodeRange(season.episode_count, discNumber, discsInSet) : null;
     updateDriveCard(card.id, (value) => ({
       ...value,
       form: {
@@ -1257,7 +1267,7 @@ export default function App() {
           <div className="drive-cards">
             {driveCards.map((card, index) => {
               const lookup = lookupFor(card);
-              const labelDisc = discNumberFromLabel(card.form.discLabel);
+              const labelDisc = lookup.discNumber ?? discNumberFromLabel(card.form.discLabel);
               const chosenSeason = lookup.detail?.seasons.find(
                 (entry) => entry.season_number === card.form.seasonNumber,
               );
@@ -1443,6 +1453,22 @@ export default function App() {
                                 </select>
                               </label>
                               <label>
+                                <span>Disc number</span>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  value={lookup.discNumber ?? discNumberFromLabel(card.form.discLabel) ?? ""}
+                                  placeholder="which one"
+                                  onChange={(e) => {
+                                    const which = e.target.value ? Number(e.target.value) : null;
+                                    patchLookup(card.id, { discNumber: which });
+                                    if (card.form.seasonNumber != null && lookup.detail) {
+                                      applySeason(card, lookup.detail, card.form.seasonNumber, lookup.discsInSet);
+                                    }
+                                  }}
+                                />
+                              </label>
+                              <label>
                                 <span>Discs in set</span>
                                 <input
                                   type="number"
@@ -1483,7 +1509,7 @@ export default function App() {
                                     ? `Disc ${labelDisc} of ${lookup.discsInSet} \u2014 episodes ${card.form.episodeRangeStart ?? "?"}\u2013${card.form.episodeRangeEnd ?? "?"} of ${chosenSeason.episode_count}.`
                                     : labelDisc
                                       ? `The label says disc ${labelDisc}. Say how many discs the set has and the episode range fills itself in.`
-                                      : `${chosenSeason.episode_count} episodes. Choose a scope below.`}
+                                      : `${chosenSeason.episode_count} episodes. Fill in the disc number and how many discs the set has to get an episode range.`}
                               </p>
                             ) : null}
                           </div>

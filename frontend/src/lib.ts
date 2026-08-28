@@ -443,6 +443,8 @@ export function showQueryFromLabel(label: string | null | undefined): string {
     .toLowerCase()
     .replace(/[_\-.]+/g, " ")
     .replace(/\b(disc|disk|dvd|vol|volume|season|ep|episode)\b/g, " ")
+    .replace(/\bbo?o?k\s*\d{1,2}\b/g, " ")
+    .replace(/\bvol(?:ume)?\s*\d{1,2}\b/g, " ")
     .replace(/\bs\d{1,2}\s?e\d{1,3}\b/g, " ")
     .replace(/\b[sd]\s?\d{1,2}\b/g, " ")
     .replace(/\b(4\s?x\s?3|16\s?x\s?9|ws|fs|ntsc|pal|se|ce|dts|ac3|thx)\b/g, " ")
@@ -456,6 +458,8 @@ export function seasonFromLabel(label: string | null | undefined): number | null
   const flat = label.replace(/[_\-.]+/g, " ");
   const match =
     /\bseason\s*(\d{1,2})\b/i.exec(flat) ??
+    // Avatar and much anime number seasons as books: AVATAR_BK3_VOL1 is S3.
+    /\bbo?o?k\s*(\d{1,2})\b/i.exec(flat) ??
     /\bs(\d{1,2})\s?e\d{1,3}\b/i.exec(flat) ??
     /\bs\s?(\d{1,2})\b/i.exec(flat);
   return match ? Number(match[1]) : null;
@@ -465,7 +469,11 @@ export function seasonFromLabel(label: string | null | undefined): number | null
 export function discNumberFromLabel(label: string | null | undefined): number | null {
   if (!label) return null;
   const flat = label.replace(/[_\-.]+/g, " ");
-  const match = /\bdis[ck]\s*(\d{1,2})\b/i.exec(flat) ?? /\bd\s?(\d{1,2})\b/i.exec(flat);
+  const match =
+    /\bdis[ck]\s*(\d{1,2})\b/i.exec(flat) ??
+    // "Volume" is one disc of a set on most TV releases.
+    /\bvol(?:ume)?\s*(\d{1,2})\b/i.exec(flat) ??
+    /\bd\s?(\d{1,2})\b/i.exec(flat);
   return match ? Number(match[1]) : null;
 }
 
