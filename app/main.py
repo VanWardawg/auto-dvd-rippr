@@ -978,6 +978,22 @@ def main() -> int:
             if job is None:
                 print("Job not found.", file=sys.stderr)
                 return 4
+            # clear_job_output_artifacts deletes the NAS copies as well as the
+            # local ones, and finalize rebuilds from the staged rip -- which is
+            # reclaimed once a job completes. On a finished job whose staging
+            # has been freed, this command would therefore delete the only
+            # copies and then have nothing to rebuild them from. Check first.
+            staged = list(
+                (Path(cfg.staging_root) / "jobs" / args.job_id / "rip_output").glob("*.mkv")
+            )
+            if not staged:
+                print(
+                    "Refusing to rebuild: no staged rip remains for this job, so the "
+                    "existing outputs are the only copies and clearing them would lose "
+                    "them. Re-rip the disc first, or rename the files in place.",
+                    file=sys.stderr,
+                )
+                return 12
             try:
                 cleanup = clear_job_output_artifacts(conn, args.job_id)
                 manifest = finalize_job_outputs(conn, cfg, args.job_id)

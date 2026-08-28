@@ -9,6 +9,7 @@ and will fail automatically when a new referencing table is added and not
 handled.
 """
 
+import json
 import sys
 import tempfile
 import unittest
@@ -373,3 +374,58 @@ class BulkReclaimTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RebuildOutputSafetyTests(unittest.TestCase):
+    """
+    Rebuilding must not destroy what it cannot rebuild.
+
+    `job rebuild-output` clears output artifacts -- which deletes the NAS
+    copies as well as the local ones -- and then re-finalizes from the staged
+    rip. But staging is reclaimed as soon as a job completes, so on a finished
+    job the NAS files are the only copies, and the obvious command for fixing
+    a misnamed episode would have deleted five of them with nothing left to
+    rebuild from.
+    """
+
+    def test_clearing_removes_the_nas_copy_too(self) -> None:
+        # The fact that makes the guard necessary.
+        import inspect
+        from autorippr import job_ops
+
+        source = inspect.getsource(job_ops.clear_job_output_artifacts)
+        self.assertIn("nas_path", source)
+
+    def test_a_job_with_no_staged_rip_is_refused(self) -> None:
+        import subprocess
+        import sys as _sys
+        import tempfile
+        from autorippr.db import open_db
+        from autorippr.state import create_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg_path = root / "config.json"
+            cfg_path.write_text(json.dumps({
+                "tmdb_api_key": "k",
+                "makemkv_path": str(root / "mk.exe"),
+                "ffmpeg_path": str(root / "ffmpeg.exe"),
+                "ffprobe_path": str(root / "ffprobe.exe"),
+                "staging_root": str(root),
+                "nas_root": str(root / "nas"),
+                "db_path": str(root / "autorippr.db"),
+                "log_path": str(root / "log.txt"),
+            }), encoding="utf-8")
+            conn = open_db(str(root / "autorippr.db"))
+            job_id = create_job(conn, disc_label="D", media_type="tv")
+            conn.commit()
+            conn.close()
+
+            app_main = Path(__file__).resolve().parents[1] / "main.py"
+            result = subprocess.run(
+                [_sys.executable, str(app_main), "--config", str(cfg_path),
+                 "job", "rebuild-output", job_id],
+                capture_output=True, text=True, timeout=90,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("only copies", result.stderr)
