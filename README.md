@@ -9,6 +9,8 @@ NAS — resuming cleanly if anything is interrupted.
 
 > **Status:** active development, Windows-only for now. Expect rough edges.
 
+[![Support this project on Ko-fi](https://img.shields.io/badge/Ko--fi-support%20this%20project-ff5e5b?logo=kofi&logoColor=white)](https://ko-fi.com/vanwardawg)
+
 ![Auto-Ripper mid-rip: pipeline stages, live throughput, and the activity log](docs/images/app-window.png)
 
 ---
