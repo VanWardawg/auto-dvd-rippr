@@ -21,6 +21,12 @@ class MappingError(RuntimeError):
     pass
 
 
+# How far outside the stated disc range to keep looking. Two episodes covers
+# the usual cause -- a set that does not divide evenly -- without reopening the
+# whole season to a mismatch.
+RANGE_SLACK_EPISODES = 2
+
+
 @dataclass(frozen=True)
 class EpisodeTarget:
     episode_number: int
@@ -292,7 +298,22 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
     range_start = int(selected["episode_range_start"]) if selected["episode_range_start"] is not None else None
     range_end = int(selected["episode_range_end"]) if selected["episode_range_end"] is not None else None
     if disc_scope == "partial_season" and range_start is not None and range_end is not None:
-        targets = [t for t in targets if range_start <= t.episode_number <= range_end]
+        # The range is the user's estimate of which episodes are on this disc,
+        # and it is routinely a little off: an Avatar season set suggested 7-11
+        # for disc 2 because the arithmetic assumed an even split, when disc 1
+        # actually held five episodes and disc 2 began at 6. Filtering to the
+        # stated range exactly made the true answer unreachable -- E06 was not
+        # among the candidates, so no amount of name matching could find it,
+        # and every episode on the disc came out one too high.
+        #
+        # Widening the window lets the name match correct a near-miss while
+        # still keeping the list short enough to be useful.
+        low = max(1, range_start - RANGE_SLACK_EPISODES)
+        high = range_end + RANGE_SLACK_EPISODES
+        widened = [t for t in targets if low <= t.episode_number <= high]
+        targets = widened or [
+            t for t in targets if range_start <= t.episode_number <= range_end
+        ]
         if not targets:
             raise MappingError(
                 f"No TMDB episodes remain after applying disc range {range_start}-{range_end}."

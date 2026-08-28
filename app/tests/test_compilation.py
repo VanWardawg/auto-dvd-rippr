@@ -589,5 +589,49 @@ class CrossSeasonOverrideTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual((row["confidence"], row["manual_override"]), (1.0, 1))
 
+
+class PartialRangeSlackTests(unittest.TestCase):
+    """
+    A slightly wrong disc range must not hide the right episode.
+
+    An Avatar Book 3 set suggested 7-11 for disc 2, because the arithmetic
+    assumed 21 episodes split evenly across four discs. Disc 1 actually held
+    five, so disc 2 began at episode 6 -- and filtering the candidates to
+    exactly 7-11 meant E06 "The Avatar and the Firelord" was not on the list at
+    all. No amount of name matching could find it, and all five episodes came
+    out one too high, onto the NAS.
+    """
+
+    def _targets(self, numbers):
+        return [
+            EpisodeTarget(episode_number=n, tmdb_episode_id=1000 + n, title=f"E{n}", season_number=3)
+            for n in numbers
+        ]
+
+    def _filtered(self, start, end, available=range(1, 22)):
+        targets = self._targets(available)
+        low = max(1, start - mapper.RANGE_SLACK_EPISODES)
+        high = end + mapper.RANGE_SLACK_EPISODES
+        return [t.episode_number for t in targets if low <= t.episode_number <= high]
+
+    def test_the_episode_just_before_the_range_stays_reachable(self) -> None:
+        # The exact miss: disc 2 was told 7-11 and actually started at 6.
+        self.assertIn(6, self._filtered(7, 11))
+
+    def test_the_stated_range_is_still_covered(self) -> None:
+        for episode in range(7, 12):
+            self.assertIn(episode, self._filtered(7, 11))
+
+    def test_the_window_stays_narrow(self) -> None:
+        # Widening must not reopen the whole season, or the name match has 21
+        # candidates and position stops meaning anything.
+        self.assertEqual(self._filtered(7, 11), [5, 6, 7, 8, 9, 10, 11, 12, 13])
+
+    def test_it_does_not_run_off_the_start_of_the_season(self) -> None:
+        self.assertEqual(min(self._filtered(1, 5)), 1)
+
+    def test_a_range_past_the_end_yields_what_exists(self) -> None:
+        self.assertEqual(self._filtered(20, 24), [18, 19, 20, 21])
+
 if __name__ == "__main__":
     unittest.main()
