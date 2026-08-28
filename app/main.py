@@ -13,6 +13,7 @@ from autorippr.config import ConfigError, load_config
 from autorippr.db import open_db
 from autorippr.logger import configure_logging, get_logger
 from autorippr.state import (
+    set_awaiting_review,
     InvalidTransitionError,
     create_job,
     get_job,
@@ -1162,7 +1163,15 @@ def main() -> int:
             try:
                 result = map_job_episodes(conn, cfg, args.job_id)
                 current = get_job(conn, args.job_id)
-                if current and current["status"] == "mapping":
+                if result.get("needs_review"):
+                    # Mapping asked for confirmation, so this must stop here.
+                    # Advancing regardless discarded the request entirely --
+                    # and transition_job clears awaiting_review on the way past,
+                    # so re-running mapping was a way to skip review without
+                    # anyone choosing to. The UI's "rerun mapping" button goes
+                    # through this same path.
+                    set_awaiting_review(conn, args.job_id, True)
+                elif current and current["status"] == "mapping":
                     if any(m.get("needs_split") for m in result["mappings"]):
                         transition_job(conn, args.job_id, "splitting")
                     else:

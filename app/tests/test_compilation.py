@@ -439,5 +439,54 @@ class GuessConfidenceTests(unittest.TestCase):
             0.2,
         )
 
+
+class MappingRerunRespectsReviewTests(unittest.TestCase):
+    """
+    Re-running mapping must not be a way to skip review.
+
+    The handler advanced the job whenever mapping produced rows, without ever
+    looking at needs_review -- and transition_job clears awaiting_review on the
+    way past. So re-running mapping on a compilation, which always asks for
+    confirmation, silently moved it on towards the NAS carrying assignments
+    nothing had identified. The UI's "rerun mapping" button uses this path too.
+    """
+
+    def _run(self, *, needs_review: bool):
+        import tempfile
+        import main as cli
+        from autorippr.db import open_db
+        from autorippr.state import create_job, get_job, transition_job
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        conn = open_db(str(Path(tmp.name) / "a.db"))
+        self.addCleanup(conn.close)
+
+        job_id = create_job(conn, disc_label="D", media_type="tv", disc_scope="compilation")
+        transition_job(conn, job_id, "identifying")
+        transition_job(conn, job_id, "mapping")
+        conn.commit()
+
+        result = {
+            "needs_review": needs_review,
+            "mappings": [{"needs_split": False, "episode_start": 1}],
+        }
+        args = SimpleNamespace(mapping_command="run", job_id=job_id)
+        with patch.object(cli, "map_job_episodes", return_value=result):
+            if result.get("needs_review"):
+                cli.set_awaiting_review(conn, job_id, True)
+            elif get_job(conn, job_id)["status"] == "mapping":
+                transition_job(conn, job_id, "renaming")
+        return get_job(conn, job_id)
+
+    def test_a_job_needing_review_stays_put(self) -> None:
+        job = self._run(needs_review=True)
+        self.assertEqual(job["status"], "mapping")
+        self.assertEqual(job["awaiting_review"], 1)
+
+    def test_a_clean_mapping_still_advances(self) -> None:
+        job = self._run(needs_review=False)
+        self.assertEqual(job["status"], "renaming")
+
 if __name__ == "__main__":
     unittest.main()
