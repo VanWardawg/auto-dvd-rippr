@@ -1,6 +1,6 @@
 [package]
 name = "autorippr-desktop"
-version = "0.1.0"
+version = "0.1.1"
 description = "Auto-Ripper desktop frontend"
 authors = ["Kevin", "Copilot", "Claude"]
 edition = "2021"
