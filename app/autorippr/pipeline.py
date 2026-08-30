@@ -362,6 +362,23 @@ def run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = Fal
                 existing_mapping_state = _resume_existing_mappings_if_ready(conn, job_id)
                 if existing_mapping_state is not None:
                     status = existing_mapping_state
+                elif _job_has_manual_mappings(conn, job_id):
+                    # The user has assigned episodes by hand. Re-running the
+                    # mapper here would delete that work and replace it with
+                    # guesses -- which it did, repeatedly, until this guard.
+                    # If readiness still fails with manual rows present,
+                    # something needs a human, not a remap.
+                    append_job_log(
+                        conn,
+                        job_id,
+                        "WARNING",
+                        "Not re-mapping over manual episode assignments; "
+                        "waiting for review instead.",
+                        None,
+                        None,
+                    )
+                    set_awaiting_review(conn, job_id, True)
+                    return {"status": "mapping", "needs_review": True}
                 else:
                     mapped = map_job_episodes(conn, cfg, job_id)
                     if mapped["needs_review"]:
@@ -660,10 +677,18 @@ def _transition_job_to_error_if_active(conn, job_id: str, message: str) -> None:
         conn.commit()
 
 
+def _job_has_manual_mappings(conn, job_id: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM episode_mappings WHERE job_id = ? AND manual_override = 1 LIMIT 1",
+        (job_id,),
+    ).fetchone()
+    return row is not None
+
+
 def _resume_existing_mappings_if_ready(conn, job_id: str) -> str | None:
     rows = conn.execute(
         """
-        SELECT id, episode_start, confidence, manual_override, needs_split
+        SELECT id, rip_title_id, episode_start, confidence, manual_override, needs_split
         FROM episode_mappings
         WHERE job_id = ?
         ORDER BY id ASC
@@ -673,7 +698,15 @@ def _resume_existing_mappings_if_ready(conn, job_id: str) -> str | None:
     if not rows:
         return None
 
-    mapped_rows = [row for row in rows if row["episode_start"] is not None]
+    # Rows without a rip title assign nothing -- they are the "episodes X have
+    # no mapped title" report. One of them held a job hostage: it sat at 0.20
+    # with no way to resolve it (the guided review only shows rows tied to
+    # ripped files), so every save re-mapped, wiped the user's overrides, and
+    # produced a fresh unresolvable row. Three times, on one disc.
+    mapped_rows = [
+        row for row in rows
+        if row["episode_start"] is not None and row["rip_title_id"] is not None
+    ]
     if not mapped_rows:
         return None
 

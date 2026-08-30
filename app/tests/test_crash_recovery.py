@@ -460,3 +460,103 @@ class PartialSetRecoveryTests(unittest.TestCase):
                 self.assertIsNone(rip_module.recover_completed_rip(conn, cfg, job_id))
             finally:
                 conn.close()
+
+
+class ManualMappingsSurviveResumeTests(unittest.TestCase):
+    """
+    A resume must never destroy episode assignments a person made.
+
+    Avatar Book 2 disc 2 looped three times: the mapper's "episodes X have no
+    mapped title" report row sat at 0.20 confidence with no rip title, the
+    readiness check counted it as unresolved, and every save re-ran mapping --
+    deleting the user's five manual overrides and minting a fresh
+    unresolvable report row. The guided review cannot even show that row,
+    since it only lists rows tied to ripped files.
+    """
+
+    def _job_with_reviewed_mappings(self, conn, *, leftover_row: bool):
+        import json as _json
+
+        job_id = create_job(conn, disc_label="AVATAR_BK2_VOL2", media_type="tv",
+                            disc_scope="partial_season", season_number=2)
+        transition_job(conn, job_id, "ripping")
+        transition_job(conn, job_id, "identifying")
+        transition_job(conn, job_id, "mapping")
+        for i in range(5):
+            rip_id = conn.execute(
+                "INSERT INTO rip_titles (job_id, title_id, duration_seconds, source_file) VALUES (?,?,?,?)",
+                (job_id, i, 1450.0, f"t{i:02d}.mkv"),
+            ).lastrowid
+            conn.execute(
+                """INSERT INTO episode_mappings (job_id, rip_title_id, season_number,
+                   episode_start, episode_end, tmdb_episode_ids_json, episode_titles_json,
+                   confidence, reason, manual_override, needs_split)
+                   VALUES (?,?,?,?,?,?,?,?,?,1,0)""",
+                (job_id, rip_id, 2, 6 + i, 6 + i, "[]", _json.dumps([f"E{6+i}"]), 1.0, "manual"),
+            )
+        if leftover_row:
+            conn.execute(
+                """INSERT INTO episode_mappings (job_id, rip_title_id, season_number,
+                   episode_start, episode_end, tmdb_episode_ids_json, episode_titles_json,
+                   confidence, reason, manual_override, needs_split)
+                   VALUES (?,NULL,?,?,?,?,?,?,?,0,0)""",
+                (job_id, 2, 7, 7, "[]", _json.dumps(["Zuko Alone"]), 0.20,
+                 "Episodes 7 have no mapped title."),
+            )
+        conn.commit()
+        return job_id
+
+    def test_the_report_row_does_not_block_readiness(self) -> None:
+        from autorippr.pipeline import _resume_existing_mappings_if_ready
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = open_db(str(Path(tmp) / "a.db"))
+            try:
+                job_id = self._job_with_reviewed_mappings(conn, leftover_row=True)
+                self.assertEqual(_resume_existing_mappings_if_ready(conn, job_id), "renaming")
+            finally:
+                conn.close()
+
+    def test_a_resume_never_remaps_over_manual_work(self) -> None:
+        from autorippr import pipeline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = build_config(Path(tmp))
+            conn = open_db(cfg.db_path)
+            try:
+                job_id = self._job_with_reviewed_mappings(conn, leftover_row=True)
+                # Force the readiness path to fail so only the guard stands
+                # between the resume and a remap.
+                with patch.object(pipeline, "_resume_existing_mappings_if_ready", return_value=None), \
+                     patch.object(pipeline, "map_job_episodes") as remap, \
+                     patch.object(pipeline, "_warn_if_nas_unreachable"):
+                    result = pipeline.run_pipeline_for_job(conn, cfg, job_id)
+                remap.assert_not_called()
+                self.assertTrue(result.get("needs_review"))
+                survivors = conn.execute(
+                    "SELECT COUNT(*) FROM episode_mappings WHERE job_id = ? AND manual_override = 1",
+                    (job_id,),
+                ).fetchone()[0]
+                self.assertEqual(survivors, 5)
+            finally:
+                conn.close()
+
+    def test_an_unreviewed_job_still_maps_normally(self) -> None:
+        from autorippr import pipeline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = build_config(Path(tmp))
+            conn = open_db(cfg.db_path)
+            try:
+                job_id = create_job(conn, disc_label="D", media_type="tv", season_number=2)
+                transition_job(conn, job_id, "ripping")
+                transition_job(conn, job_id, "identifying")
+                transition_job(conn, job_id, "mapping")
+                conn.commit()
+                with patch.object(pipeline, "map_job_episodes",
+                                  return_value={"needs_review": True, "mappings": []}) as remap, \
+                     patch.object(pipeline, "_warn_if_nas_unreachable"):
+                    pipeline.run_pipeline_for_job(conn, cfg, job_id)
+                remap.assert_called_once()
+            finally:
+                conn.close()
