@@ -280,6 +280,47 @@ def _select_tv_titles(
     )
 
 
+def matches_subset_runtime(
+    target_seconds: float,
+    pool_seconds: list[float],
+    *,
+    tolerance: float = 0.03,
+    min_subset: int = 3,
+) -> bool:
+    """
+    Whether some subset of `pool_seconds` sums to `target_seconds`.
+
+    A play-all runs the disc's episodes back to back, so its length is the sum
+    of the *episodes* -- not of everything episode-shaped on the disc. An
+    Avatar disc carried a 24.7-minute featurette alongside five 24-minute
+    episodes, and comparing the 120-minute play-all against the whole 144.7
+    made it look like nothing; against the right subset it is a 0.1% match.
+
+    min_subset of three keeps a genuine double-length episode, whose runtime
+    equals the sum of just two others, from being written off as redundant.
+    """
+    if target_seconds <= 0 or len(pool_seconds) < min_subset:
+        return False
+    # Sums achievable from the pool, mapped to the fewest items achieving
+    # them. Seconds are bucketed to keep the state space small; the tolerance
+    # comparison at the end is what actually decides.
+    bucket = 15.0
+    achievable: dict[int, int] = {0: 0}
+    for seconds in pool_seconds:
+        if seconds <= 0:
+            continue
+        step = int(round(seconds / bucket))
+        for total, count in list(achievable.items()):
+            key = total + step
+            if key not in achievable or achievable[key] > count + 1:
+                achievable[key] = count + 1
+    window = max(target_seconds * tolerance, bucket)
+    return any(
+        count >= min_subset and abs(total * bucket - target_seconds) <= window
+        for total, count in achievable.items()
+    )
+
+
 def _identify_play_all_titles(
     candidates: list[TitleCandidate],
     episodes: list[TitleCandidate],
@@ -289,6 +330,7 @@ def _identify_play_all_titles(
     episode_total = sum(c.duration_seconds for c in episodes)
     if episode_total <= 0:
         return set()
+    durations = [c.duration_seconds for c in episodes]
     play_all: set[int] = set()
     for candidate in candidates:
         if candidate in episodes:
@@ -296,6 +338,11 @@ def _identify_play_all_titles(
         # Within 10% of the combined episode runtime, and clearly longer than
         # any single episode.
         if abs(candidate.duration_seconds - episode_total) <= episode_total * 0.10:
+            play_all.add(candidate.title_id)
+        # ...or matching a subset of the episodes: an episode-length extra in
+        # the pool inflates the whole-disc total, but the play-all still sums
+        # exactly to the episodes it actually contains.
+        elif matches_subset_runtime(candidate.duration_seconds, durations):
             play_all.add(candidate.title_id)
     return play_all
 

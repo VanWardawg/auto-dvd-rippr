@@ -12,6 +12,7 @@ from typing import Any
 
 from .config import AppConfig
 from .dvdnav_menu import extract_dvdnav_menu_artifacts
+from .makemkv import matches_subset_runtime
 from .rip import discover_optical_drives
 from .state import append_job_log
 from .tmdb import TmdbError, fetch_tmdb_tv_episodes
@@ -1400,6 +1401,15 @@ def _identify_likely_play_all_titles(rip_rows) -> set[int]:
         others = full_length_sum - dur if is_full else full_length_sum
         others_count = len(full_lengths) - (1 if is_full else 0)
         if others_count >= 2 and others >= 20 * 60 and 0.85 <= (dur / others) <= 1.15:
+            result.add(int(r["id"]))
+            continue
+        # A single episode-length extra on the disc inflates the whole-sum
+        # ratio past the window, but the play-all still equals the sum of the
+        # subset that is actually the episodes.
+        pool = list(full_lengths)
+        if is_full:
+            pool.remove(dur)
+        if matches_subset_runtime(dur, pool):
             result.add(int(r["id"]))
             continue
         source_file = Path(str(r["source_file"] or ""))

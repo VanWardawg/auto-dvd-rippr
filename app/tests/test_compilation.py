@@ -806,5 +806,30 @@ class PlayAllDetectionTests(unittest.TestCase):
         rows = self._rows([("a1_t00", 90.0), ("b1_t01", 90.0)])
         self.assertEqual(mapper._identify_likely_play_all_titles(rows), set())
 
+
+class PlayAllSubsetTests(unittest.TestCase):
+    """Mapping-side twin of the rip-side fix: the Avatar Book 2 disc 1 shape,
+    where an episode-length featurette hid the play-all from the whole-sum
+    ratio and the user had to ignore twenty gigabytes of duplicate by hand."""
+
+    def _rows(self, spec):
+        return [
+            {"id": i + 1, "title_id": i, "duration_seconds": m * 60,
+             "chapter_count": 6, "source_file": f"{name}.mkv", "raw_metadata_json": None}
+            for i, (name, m) in enumerate(spec)
+        ]
+
+    def test_the_extra_no_longer_hides_the_play_all(self) -> None:
+        rows = self._rows([("b1_t00", 120.1), ("c1_t01", 24.0), ("c2_t02", 24.0),
+                           ("c3_t03", 24.0), ("d1_t04", 24.0), ("d2_t05", 24.0),
+                           ("e1_t06", 24.7)])
+        self.assertEqual(mapper._identify_likely_play_all_titles(rows), {1})
+
+    def test_the_featurette_itself_stays_an_episode_candidate(self) -> None:
+        rows = self._rows([("b1_t00", 120.1), ("c1_t01", 24.0), ("c2_t02", 24.0),
+                           ("c3_t03", 24.0), ("d1_t04", 24.0), ("d2_t05", 24.0),
+                           ("e1_t06", 24.7)])
+        self.assertNotIn(7, mapper._identify_likely_play_all_titles(rows))
+
 if __name__ == "__main__":
     unittest.main()

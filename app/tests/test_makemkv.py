@@ -605,3 +605,74 @@ class CancellationCheckTests(unittest.TestCase):
         conn = unittest.mock.MagicMock()
         with patch.object(rip, "get_job", return_value=None):
             self.assertFalse(rip._job_is_still_ripping(conn, "job"))
+
+
+class PlayAllBesideExtraTests(unittest.TestCase):
+    """
+    An episode-length extra must not hide the play-all.
+
+    Avatar Book 2 disc 1: five 24-minute episodes, a 24.7-minute featurette,
+    and a 120.1-minute play-all. Detection compared the play-all against the
+    sum of everything episode-shaped (144.7 min) and found no match -- so the
+    play-all was ripped as a "combined episodes" title, twenty gigabytes of
+    duplicate content, and the user had to ignore it by hand at review. The
+    play-all equals the sum of the *episodes*: a subset, not the whole pool.
+    """
+
+    def _disc(self):
+        return [
+            title(0, 120.1, size_gb=6.0, name="B1_t00.mkv"),   # play-all
+            title(1, 24.0, name="C1_t01.mkv"),
+            title(2, 24.0, name="C2_t02.mkv"),
+            title(3, 24.0, name="C3_t03.mkv"),
+            title(4, 24.0, name="D1_t04.mkv"),
+            title(5, 24.0, name="D2_t05.mkv"),
+            title(6, 24.7, name="E1_t06.mkv"),                 # featurette
+            title(7, 2.0, name="A1_t07.mkv"),                  # menu junk
+        ]
+
+    def test_the_play_all_is_skipped_despite_the_extra(self) -> None:
+        selection = select_titles(self._disc(), media_type="tv")
+        self.assertNotIn(0, selection.title_ids)
+
+    def test_the_episodes_and_the_extra_are_still_ripped(self) -> None:
+        # The extra is indistinguishable from an episode by duration alone;
+        # keeping it is correct -- review decides what it is.
+        selection = select_titles(self._disc(), media_type="tv")
+        self.assertEqual(sorted(selection.title_ids), [1, 2, 3, 4, 5, 6])
+
+    def test_a_clean_disc_still_detects_by_whole_sum(self) -> None:
+        # Book 2 disc 2's shape: no episode-length extra, and the original
+        # ten-percent whole-sum rule already caught it.
+        disc = [
+            title(0, 122.0, size_gb=6.0, name="B1_t00.mkv"),
+            *[title(i, 24.4, name=f"C{i}_t0{i}.mkv") for i in range(1, 6)],
+            title(6, 3.0, name="A1_t06.mkv"),
+        ]
+        selection = select_titles(disc, media_type="tv")
+        self.assertNotIn(0, selection.title_ids)
+
+
+class SubsetRuntimeTests(unittest.TestCase):
+    def test_the_avatar_shape_matches(self) -> None:
+        from autorippr.makemkv import matches_subset_runtime
+
+        eps = [24.0 * 60] * 5
+        self.assertTrue(matches_subset_runtime(120.1 * 60, eps + [24.7 * 60]))
+
+    def test_a_double_length_episode_is_not_redundant(self) -> None:
+        # 48.5 equals the sum of two singles; a genuine two-part title must
+        # survive, so three items is the floor for calling something a sum.
+        from autorippr.makemkv import matches_subset_runtime
+
+        self.assertFalse(matches_subset_runtime(48.5 * 60, [24.0 * 60] * 5))
+
+    def test_an_unmatchable_runtime_does_not_match(self) -> None:
+        from autorippr.makemkv import matches_subset_runtime
+
+        self.assertFalse(matches_subset_runtime(100.0 * 60, [24.0 * 60] * 5))
+
+    def test_an_empty_pool_never_matches(self) -> None:
+        from autorippr.makemkv import matches_subset_runtime
+
+        self.assertFalse(matches_subset_runtime(120.0 * 60, []))
