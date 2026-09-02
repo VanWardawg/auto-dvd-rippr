@@ -37,6 +37,7 @@ from autorippr.tmdb import (
 from autorippr.mapper import (
     MappingError,
     analyze_dvd_menu,
+    fetch_compilation_episodes,
     map_job_episodes,
     set_mapping_ignore,
     set_mapping_override,
@@ -337,6 +338,50 @@ def _sync_movie_job_status(job: dict[str, Any], selected_media: Any) -> dict[str
         job["status"] = "renaming"
         job["current_stage"] = "renaming"
     return job
+
+
+def _episode_pools_for_snapshot(
+    conn, cfg, job: dict[str, Any], selected_media: Any
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    The episode pools the guided review picks from.
+
+    `season_episodes` is the job's own season narrowed to its disc range;
+    `all_season_episodes` is the wider fallback. For a season-shaped disc the
+    two differ only by that range. A compilation has no season of its own --
+    its episodes come from across the show -- so it gets the whole run, each
+    episode carrying the season it belongs to, and an empty scoped pool.
+    """
+    season_episodes: list[dict[str, Any]] = []
+    all_season_episodes: list[dict[str, Any]] = []
+    if not selected_media or str(selected_media["media_type"]) != "tv":
+        return season_episodes, all_season_episodes
+
+    if str(job.get("disc_scope") or "") == "compilation":
+        all_season_episodes = fetch_compilation_episodes(
+            conn,
+            cfg,
+            int(selected_media["tmdb_id"]),
+            include_specials=bool(job.get("include_specials")),
+        )
+        return season_episodes, all_season_episodes
+
+    job_season = job.get("season_number")
+    selected_season = selected_media["season_number"]
+    season_number = int(job_season or selected_season or 1)
+    all_season_episodes = [
+        {**dict(ep), "season_number": season_number}
+        for ep in fetch_tmdb_tv_episodes(conn, cfg, int(selected_media["tmdb_id"]), season_number)
+    ]
+    season_episodes = list(all_season_episodes)
+    if job.get("episode_range_start") is not None and job.get("episode_range_end") is not None:
+        start = int(job["episode_range_start"])
+        end = int(job["episode_range_end"])
+        season_episodes = [
+            ep for ep in season_episodes
+            if start <= int(ep["episode_number"]) <= end
+        ]
+    return season_episodes, all_season_episodes
 
 
 def _build_review_state(
@@ -864,21 +909,9 @@ def main() -> int:
                 """,
                 (args.job_id,),
             ).fetchall()
-            season_episodes = []
-            all_season_episodes = []
-            if selected_media and str(selected_media["media_type"]) == "tv":
-                job_season = job.get("season_number")
-                selected_season = selected_media["season_number"]
-                season_number = int(job_season or selected_season or 1)
-                all_season_episodes = fetch_tmdb_tv_episodes(conn, cfg, int(selected_media["tmdb_id"]), season_number)
-                season_episodes = list(all_season_episodes)
-                if job.get("episode_range_start") is not None and job.get("episode_range_end") is not None:
-                    start = int(job["episode_range_start"])
-                    end = int(job["episode_range_end"])
-                    season_episodes = [
-                        ep for ep in season_episodes
-                        if start <= int(ep["episode_number"]) <= end
-                    ]
+            season_episodes, all_season_episodes = _episode_pools_for_snapshot(
+                conn, cfg, job, selected_media
+            )
             staging_job_root = Path(cfg.staging_root) / "jobs" / args.job_id
             menu_analysis = _load_json_file(staging_job_root / "menu_analysis" / "menu_analysis.json")
             bundle_association = _load_json_file(staging_job_root / "menu_analysis" / "bundle_association.json")

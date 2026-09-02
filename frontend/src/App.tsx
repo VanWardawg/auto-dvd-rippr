@@ -48,7 +48,9 @@ import {
   MOVIE_PIPELINE_STAGES,
   TV_PIPELINE_STAGES,
   buildConfigDraft,
+  buildEpisodeChoices,
   buildGuidedReviewRows,
+  filterEpisodeChoices,
   buildGuidedSplitDrafts,
   coerceConfigDraft,
   episodeLabel,
@@ -73,7 +75,7 @@ import {
   ripTitleDisplay,
   tmdbCandidateDisplay,
 } from "./lib";
-import type { DriveCardState, GuidedReviewRowDraft, GuidedSplitDraft } from "./lib";
+import type { DriveCardState, EpisodeChoice, GuidedReviewRowDraft, GuidedSplitDraft } from "./lib";
 import type { TvShowDetail, TvShowResult } from "./types";
 import type { DiscDrive, EpisodeMapping, JobLog, JobSnapshot, JobStatus, JobSummary, RipTitle, RuntimeConfigState, SelectedMovieSlot, SplitPlan, StartJobRequest, TmdbCandidate } from "./types";
 
@@ -87,6 +89,101 @@ const POLL_MS = 3000;
  */
 function Spinner() {
   return <span className="spinner" aria-hidden="true" />;
+}
+
+const EPISODE_SEARCH_VISIBLE_LIMIT = 40;
+
+/**
+ * Type-to-search episode picker for the guided review.
+ *
+ * A season disc's 26 episodes fit in a dropdown; a compilation offers the
+ * whole show -- Mickey Mouse Clubhouse is 123 episodes across four seasons,
+ * and a reviewer who knows a title is "Minnie's Pet Salon" should be able to
+ * type "salon" rather than scan for it. Picking an episode also answers the
+ * season, so a cross-season choice fills both columns at once.
+ */
+function EpisodeSearchSelect({
+  choices,
+  seasonValue,
+  episodeValue,
+  disabled,
+  onSelect,
+}: {
+  choices: EpisodeChoice[];
+  seasonValue: string;
+  episodeValue: string;
+  disabled: boolean;
+  onSelect: (choice: EpisodeChoice | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const shown = useMemo(() => filterEpisodeChoices(choices, query), [choices, query]);
+  const selected =
+    choices.find(
+      (choice) =>
+        String(choice.episode) === episodeValue &&
+        (choice.season == null || seasonValue === "" || String(choice.season) === seasonValue),
+    ) ?? null;
+
+  const close = () => {
+    setOpen(false);
+    setQuery("");
+  };
+  const pick = (choice: EpisodeChoice | null) => {
+    onSelect(choice);
+    close();
+  };
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="episode-search-value"
+        disabled={disabled}
+        onClick={() => setOpen(true)}
+        title={selected?.label}
+      >
+        {selected ? selected.label : episodeValue ? `E${episodeValue}` : "—"}
+      </button>
+    );
+  }
+
+  return (
+    <div className="episode-search">
+      <input
+        autoFocus
+        value={query}
+        placeholder="Type to search…"
+        onChange={(e) => setQuery(e.target.value)}
+        onBlur={close}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && shown.length > 0) pick(shown[0]);
+          if (e.key === "Escape") close();
+        }}
+      />
+      <ul className="episode-search-list">
+        <li>
+          {/* onMouseDown so the choice lands before the input's blur closes the list */}
+          <button type="button" onMouseDown={(e) => { e.preventDefault(); pick(null); }}>
+            — (unassigned)
+          </button>
+        </li>
+        {shown.slice(0, EPISODE_SEARCH_VISIBLE_LIMIT).map((choice) => (
+          <li key={choice.key}>
+            <button type="button" onMouseDown={(e) => { e.preventDefault(); pick(choice); }}>
+              {choice.label}
+            </button>
+          </li>
+        ))}
+        {shown.length > EPISODE_SEARCH_VISIBLE_LIMIT && (
+          <li className="episode-search-more">
+            {shown.length - EPISODE_SEARCH_VISIBLE_LIMIT} more — keep typing to narrow
+          </li>
+        )}
+        {shown.length === 0 && <li className="episode-search-more">No episode matches</li>}
+      </ul>
+    </div>
+  );
 }
 
 type QuickAction = {
@@ -861,23 +958,18 @@ export default function App() {
       };
     });
   }, [modal, tmdbCandidates]);
-  const allSeasonEpisodeOptions = useMemo(() => {
-    return (snapshot?.all_season_episodes ?? [])
-      .map((episode) => ({
-        value: String(episode.episode_number),
-        label: `E${String(episode.episode_number).padStart(2, "0")} • ${episode.name}`,
-      }))
-      .sort((a, b) => Number(a.value) - Number(b.value));
+  const episodeChoices = useMemo(() => {
+    const scoped = snapshot?.season_episodes ?? [];
+    return buildEpisodeChoices(scoped.length > 0 ? scoped : snapshot?.all_season_episodes ?? []);
   }, [snapshot]);
   const episodeOptions = useMemo(() => {
-    const filtered = (snapshot?.season_episodes ?? [])
-      .map((episode) => ({
-        value: String(episode.episode_number),
-        label: `E${String(episode.episode_number).padStart(2, "0")} • ${episode.name}`,
-      }))
-      .sort((a, b) => Number(a.value) - Number(b.value));
-    return filtered.length > 0 ? filtered : allSeasonEpisodeOptions;
-  }, [allSeasonEpisodeOptions, snapshot]);
+    // The range-and-remap controls speak in bare episode numbers, which only
+    // mean anything when every choice shares a season. A compilation's
+    // cross-season pool leaves them empty -- there is no range to remap.
+    const crossSeason = episodeChoices.some((choice) => choice.season !== episodeChoices[0]?.season);
+    if (crossSeason) return [];
+    return episodeChoices.map((choice) => ({ value: String(choice.episode), label: choice.label }));
+  }, [episodeChoices]);
 
   function runSelectedAction(name: string, fn: (jobId: string) => Promise<void>) {
     if (!selectedJobId) return;
@@ -2769,46 +2861,52 @@ export default function App() {
                                 />
                               </td>
                               <td>
-                                <select
-                                  value={row.episodeStart}
+                                <EpisodeSearchSelect
+                                  choices={episodeChoices}
+                                  seasonValue={row.seasonNumber}
+                                  episodeValue={row.episodeStart}
                                   disabled={row.status === "ignore"}
-                                  onChange={(e) => {
-                                    const value = e.target.value;
+                                  onSelect={(choice) => {
                                     setGuidedReviewRows((current) => current.map((candidate) => (
                                       candidate.ripTitleId === row.ripTitleId
-                                        ? { ...candidate, episodeStart: value }
+                                        ? {
+                                            ...candidate,
+                                            episodeStart: choice ? String(choice.episode) : "",
+                                            // Picking an episode names its season too.
+                                            seasonNumber: choice?.season != null ? String(choice.season) : candidate.seasonNumber,
+                                            // A single-episode row's end follows its start.
+                                            episodeEnd:
+                                              choice && (candidate.episodeEnd === "" || candidate.episodeEnd === candidate.episodeStart)
+                                                ? String(choice.episode)
+                                                : candidate.episodeEnd,
+                                          }
                                         : candidate
                                     )));
                                   }}
-                                >
-                                  <option value="">—</option>
-                                  {episodeOptions.map((option) => (
-                                    <option key={option.value} value={option.value}>
-                                      {option.label}
-                                    </option>
-                                  ))}
-                                </select>
+                                />
                               </td>
                               <td>
-                                <select
-                                  value={row.episodeEnd}
+                                <EpisodeSearchSelect
+                                  choices={
+                                    // A range lives inside one season, so the end
+                                    // is picked from the start's season.
+                                    row.seasonNumber === ""
+                                      ? episodeChoices
+                                      : episodeChoices.filter(
+                                          (choice) => choice.season == null || String(choice.season) === row.seasonNumber,
+                                        )
+                                  }
+                                  seasonValue={row.seasonNumber}
+                                  episodeValue={row.episodeEnd}
                                   disabled={row.status === "ignore"}
-                                  onChange={(e) => {
-                                    const value = e.target.value;
+                                  onSelect={(choice) => {
                                     setGuidedReviewRows((current) => current.map((candidate) => (
                                       candidate.ripTitleId === row.ripTitleId
-                                        ? { ...candidate, episodeEnd: value }
+                                        ? { ...candidate, episodeEnd: choice ? String(choice.episode) : "" }
                                         : candidate
                                     )));
                                   }}
-                                >
-                                  <option value="">—</option>
-                                  {episodeOptions.map((option) => (
-                                    <option key={option.value} value={option.value}>
-                                      {option.label}
-                                    </option>
-                                  ))}
-                                </select>
+                                />
                               </td>
                               <td>{row.reason || "—"}</td>
                             </tr>

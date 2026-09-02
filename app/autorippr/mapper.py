@@ -193,7 +193,7 @@ def _season_for_row(
     return default_season
 
 
-def _fetch_compilation_episodes(
+def fetch_compilation_episodes(
     conn,
     cfg: AppConfig,
     tmdb_show_id: int,
@@ -268,7 +268,7 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
     season_number = selected["season_number"] if selected["season_number"] is not None else 1
     disc_scope_early = str(selected["disc_scope"] or "")
     if disc_scope_early == "compilation":
-        episodes = _fetch_compilation_episodes(
+        episodes = fetch_compilation_episodes(
             conn,
             cfg,
             int(selected["tmdb_id"]),

@@ -16,7 +16,9 @@ import {
   MOVIE_PIPELINE_STAGES,
   TV_PIPELINE_STAGES,
   buildConfigDraft,
+  buildEpisodeChoices,
   buildGuidedReviewRows,
+  filterEpisodeChoices,
   coerceConfigDraft,
   episodeLabel,
   fileNameFromPath,
@@ -538,5 +540,69 @@ describe("guided review rows carry a season", () => {
     const rows = buildGuidedReviewRows(ripTitles, [] as never[]);
     expect(rows).toHaveLength(2);
     expect(rows[0].status).toBe("ignore");
+  });
+});
+
+describe("episode search choices", () => {
+  // The Minnie's Pet Salon review: a pool spanning the whole show, where a
+  // single-season dropdown left the right answers off the list entirely.
+  const crossSeason = [
+    { id: 2005, episode_number: 5, name: "Minnie's Picnic", season_number: 2 },
+    { id: 1002, episode_number: 2, name: "A Surprise for Minnie", season_number: 1 },
+    { id: 3008, episode_number: 8, name: "Minnie's Birthday", season_number: 3 },
+  ];
+
+  it("labels carry the season when the pool spans seasons", () => {
+    const choices = buildEpisodeChoices(crossSeason);
+    expect(choices.map((c) => c.label)).toEqual([
+      "S1E02 • A Surprise for Minnie",
+      "S2E05 • Minnie's Picnic",
+      "S3E08 • Minnie's Birthday",
+    ]);
+  });
+
+  it("a single-season pool keeps the plain label the review always had", () => {
+    const choices = buildEpisodeChoices([
+      { id: 2, episode_number: 2, name: "Cave of Two Lovers", season_number: 2 },
+      { id: 1, episode_number: 1, name: "The Avatar State", season_number: 2 },
+    ]);
+    expect(choices.map((c) => c.label)).toEqual([
+      "E01 • The Avatar State",
+      "E02 • Cave of Two Lovers",
+    ]);
+  });
+
+  it("sorts by season then episode so the list reads like the show", () => {
+    const choices = buildEpisodeChoices(crossSeason);
+    expect(choices.map((c) => c.key)).toEqual(["1:2", "2:5", "3:8"]);
+  });
+
+  it("each choice knows its own season for the row to take", () => {
+    const choices = buildEpisodeChoices(crossSeason);
+    expect(choices.find((c) => c.episode === 8)?.season).toBe(3);
+  });
+
+  it("finds an episode by a word from its title", () => {
+    const choices = buildEpisodeChoices(crossSeason);
+    const hits = filterEpisodeChoices(choices, "picnic");
+    expect(hits).toHaveLength(1);
+    expect(hits[0].episode).toBe(5);
+  });
+
+  it("every term must match, so narrowing works", () => {
+    const choices = buildEpisodeChoices(crossSeason);
+    expect(filterEpisodeChoices(choices, "minnie")).toHaveLength(3);
+    expect(filterEpisodeChoices(choices, "minnie birthday")).toHaveLength(1);
+  });
+
+  it("matches the season-episode code too", () => {
+    // A reviewer who already knows it is S3E08 should not have to know the name.
+    const choices = buildEpisodeChoices(crossSeason);
+    expect(filterEpisodeChoices(choices, "s3e08")).toHaveLength(1);
+  });
+
+  it("a blank query filters nothing", () => {
+    const choices = buildEpisodeChoices(crossSeason);
+    expect(filterEpisodeChoices(choices, "  ")).toHaveLength(3);
   });
 });

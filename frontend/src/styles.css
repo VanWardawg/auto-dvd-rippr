@@ -1694,6 +1694,70 @@ input::placeholder {
   width: 4.5rem;
 }
 
+/* ---- Episode search picker ------------------------------------------------
+   A compilation offers the whole show as candidates -- over a hundred
+   episodes -- so the review's episode cells are type-to-search rather than a
+   dropdown to scroll. The closed state is a button styled like an input; open,
+   it becomes a query box with the matching episodes floated beneath it. */
+
+.episode-search {
+  position: relative;
+  min-width: 180px;
+}
+
+.episode-search-value {
+  width: 100%;
+  min-width: 180px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  font-weight: normal;
+}
+
+.episode-search input {
+  width: 100%;
+}
+
+.episode-search-list {
+  position: absolute;
+  z-index: 30;
+  top: 100%;
+  left: 0;
+  margin: 0.2rem 0 0;
+  padding: 0.25rem;
+  list-style: none;
+  min-width: 260px;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.episode-search-list li button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: 0.3rem 0.5rem;
+  font-weight: normal;
+  white-space: nowrap;
+}
+
+.episode-search-list li button:hover {
+  background: var(--bg-surface);
+}
+
+.episode-search-more {
+  padding: 0.3rem 0.5rem;
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+
 /* ---- Activity spinner -----------------------------------------------------
    Backend commands run off the main thread now, so the window no longer
    freezes while they work -- which also means nothing visibly happens until

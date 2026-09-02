@@ -50,7 +50,7 @@ class CompilationEpisodePoolTests(unittest.TestCase):
         with patch.object(mapper, "_cached_show_detail", return_value=CLUBHOUSE_SEASONS), patch.object(
             mapper, "fetch_tmdb_tv_episodes", side_effect=fake_episodes
         ):
-            return mapper._fetch_compilation_episodes(
+            return mapper.fetch_compilation_episodes(
                 None, None, 3934, include_specials=include_specials
             )
 
@@ -318,7 +318,7 @@ class CompilationAlwaysReviewedTests(unittest.TestCase):
         }]
         episodes = [{"episode_number": 1, "id": 1001, "name": "Something", "season_number": 1}]
 
-        with patch.object(mapper, "_fetch_compilation_episodes", return_value=episodes), patch.object(
+        with patch.object(mapper, "fetch_compilation_episodes", return_value=episodes), patch.object(
             mapper, "fetch_tmdb_tv_episodes", return_value=episodes
         ), patch.object(mapper, "_plan_mappings", return_value=planned), patch.object(
             mapper, "_clear_downstream_state_for_remap"
@@ -830,6 +830,81 @@ class PlayAllSubsetTests(unittest.TestCase):
                            ("c3_t03", 24.0), ("d1_t04", 24.0), ("d2_t05", 24.0),
                            ("e1_t06", 24.7)])
         self.assertNotIn(7, mapper._identify_likely_play_all_titles(rows))
+
+class SnapshotEpisodePoolTests(unittest.TestCase):
+    """
+    What the guided review is given to pick from.
+
+    The snapshot fed the review exactly one season's episodes, chosen by the
+    job's season number -- which a compilation does not have, so it defaulted
+    to season 1. Reviewing "Minnie's Pet Salon" meant a dropdown of season 1
+    titles for a disc whose episodes live in seasons 1 through 4: the right
+    answer was not on the list.
+    """
+
+    SELECTED = {"media_type": "tv", "tmdb_id": 3934, "season_number": None}
+
+    def _pools(self, job, *, specials_pool=False):
+        import main as cli
+
+        def fake_compilation(_conn, _cfg, _show_id, *, include_specials):
+            episodes = [
+                {"episode_number": 2, "id": 1002, "name": "A Surprise for Minnie", "season_number": 1},
+                {"episode_number": 5, "id": 2005, "name": "Minnie's Picnic", "season_number": 2},
+            ]
+            if include_specials:
+                episodes.append({"episode_number": 1, "id": 1, "name": "Special", "season_number": 0})
+            return episodes
+
+        def fake_season(_conn, _cfg, _show_id, season_number):
+            return [
+                {"episode_number": n, "id": season_number * 1000 + n, "name": f"E{n}"}
+                for n in range(1, 6)
+            ]
+
+        with patch.object(cli, "fetch_compilation_episodes", side_effect=fake_compilation), patch.object(
+            cli, "fetch_tmdb_tv_episodes", side_effect=fake_season
+        ):
+            return cli._episode_pools_for_snapshot(None, None, job, self.SELECTED)
+
+    def test_a_compilation_offers_the_whole_show(self) -> None:
+        job = {"disc_scope": "compilation", "include_specials": 0}
+        season_episodes, all_episodes = self._pools(job)
+        self.assertEqual(season_episodes, [])
+        self.assertEqual(sorted({ep["season_number"] for ep in all_episodes}), [1, 2])
+
+    def test_the_specials_choice_is_honoured(self) -> None:
+        job = {"disc_scope": "compilation", "include_specials": 1}
+        _, all_episodes = self._pools(job)
+        self.assertIn(0, {ep["season_number"] for ep in all_episodes})
+
+    def test_a_season_disc_still_gets_its_one_season(self) -> None:
+        job = {"disc_scope": "full_season", "season_number": 3}
+        season_episodes, all_episodes = self._pools(job)
+        self.assertEqual(len(season_episodes), 5)
+        # Every episode says which season it is, so the frontend renders one
+        # shape of choice whatever the disc.
+        self.assertEqual({ep["season_number"] for ep in all_episodes}, {3})
+
+    def test_the_disc_range_still_narrows_a_season(self) -> None:
+        job = {
+            "disc_scope": "partial_season",
+            "season_number": 2,
+            "episode_range_start": 2,
+            "episode_range_end": 3,
+        }
+        season_episodes, all_episodes = self._pools(job)
+        self.assertEqual([ep["episode_number"] for ep in season_episodes], [2, 3])
+        self.assertEqual(len(all_episodes), 5)
+
+    def test_a_movie_job_has_no_pools(self) -> None:
+        import main as cli
+
+        movie = {"media_type": "movie", "tmdb_id": 1, "season_number": None}
+        self.assertEqual(
+            cli._episode_pools_for_snapshot(None, None, {"disc_scope": None}, movie), ([], [])
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

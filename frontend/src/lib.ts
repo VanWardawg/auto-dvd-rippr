@@ -12,6 +12,7 @@ import type {
   JobSnapshot,
   JobStatus,
   RipTitle,
+  SeasonEpisodeOption,
   SelectedMedia,
   SelectedMovieSlot,
   SplitPlan,
@@ -37,6 +38,48 @@ export type GuidedReviewRowDraft = {
   confidence: string;
   reason: string;
 };
+
+/**
+ * One pickable episode in the guided review.
+ *
+ * A season-shaped disc offers one season and an episode number identifies a
+ * choice on its own. A compilation offers the whole show, where "episode 2"
+ * exists in every season -- so a choice carries its season, the label says
+ * which one it is, and picking it answers both columns at once.
+ */
+export type EpisodeChoice = {
+  key: string;
+  season: number | null;
+  episode: number;
+  label: string;
+};
+
+export function buildEpisodeChoices(episodes: SeasonEpisodeOption[]): EpisodeChoice[] {
+  const seasons = new Set(episodes.map((ep) => ep.season_number ?? null));
+  const crossSeason = seasons.size > 1;
+  return episodes
+    .map((ep) => {
+      const season = ep.season_number ?? null;
+      const number = `E${String(ep.episode_number).padStart(2, "0")}`;
+      return {
+        key: `${season ?? ""}:${ep.episode_number}`,
+        season,
+        episode: ep.episode_number,
+        label: `${crossSeason && season != null ? `S${season}` : ""}${number} • ${ep.name}`,
+      };
+    })
+    .sort((a, b) => (a.season ?? 0) - (b.season ?? 0) || a.episode - b.episode);
+}
+
+/** Case-insensitive match of every whitespace-separated term against the label. */
+export function filterEpisodeChoices(choices: EpisodeChoice[], query: string): EpisodeChoice[] {
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return choices;
+  return choices.filter((choice) => {
+    const label = choice.label.toLowerCase();
+    return terms.every((term) => label.includes(term));
+  });
+}
 
 export type GuidedSplitDraft = {
   splitPlanId: string;

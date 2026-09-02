@@ -163,6 +163,9 @@ export interface SeasonEpisodeOption {
   episode_number: number;
   name: string;
   runtime?: number | null;
+  // Present when the pool spans seasons (a compilation disc); absent rows
+  // belong to the job's own season.
+  season_number?: number | null;
 }
 
 export interface StorageState {
