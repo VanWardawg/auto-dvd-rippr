@@ -152,6 +152,32 @@ def _resume_errored_job(conn, job) -> str:
     return stage
 
 
+def _outputs_cover_every_mapping(conn, job_id: str) -> bool:
+    """
+    Whether the renaming stage ran to completion.
+
+    Every mapping that assigns episodes to a ripped file owes at least one
+    finalized output (a split mapping owes several, so >= is the right
+    comparison). Fewer outputs than that means finalize crashed partway, and
+    the job's next stop is renaming again -- finalize starts by clearing its
+    old rows, so re-running it is safe. Movie jobs have no episode mappings
+    and always pass.
+    """
+    expected = conn.execute(
+        """
+        SELECT COUNT(*) AS c FROM episode_mappings
+        WHERE job_id = ? AND rip_title_id IS NOT NULL AND episode_start IS NOT NULL
+        """,
+        (job_id,),
+    ).fetchone()["c"]
+    if not expected:
+        return True
+    outputs = conn.execute(
+        "SELECT COUNT(*) AS c FROM outputs WHERE job_id = ?", (job_id,)
+    ).fetchone()["c"]
+    return outputs >= expected
+
+
 def _infer_resume_stage(conn, job) -> str:
     """
     Decide where a failed job should pick up, based on what it already produced.
@@ -174,6 +200,13 @@ def _infer_resume_stage(conn, job) -> str:
         # under its old, wrong name. Re-finalizing is cheap -- it renames local
         # files -- and it is the only way the correction reaches the NAS.
         if _selection_is_newer_than_outputs(conn, job_id):
+            return "renaming"
+        # ...and only if naming actually finished. finalize writes output rows
+        # one mapping at a time, so a crash partway leaves some -- and "some
+        # outputs exist" once read as "naming succeeded". The I Heart Minnie
+        # disc resumed into copying with one of five files finalized, was
+        # declared done, and the reclaim then deleted the other four rips.
+        if not _outputs_cover_every_mapping(conn, job_id):
             return "renaming"
         return "copying"
 

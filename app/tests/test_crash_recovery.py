@@ -560,3 +560,64 @@ class ManualMappingsSurviveResumeTests(unittest.TestCase):
                 remap.assert_called_once()
             finally:
                 conn.close()
+
+
+class PartialFinalizeResumeTests(unittest.TestCase):
+    """
+    Resume must not treat a half-finished renaming as a finished one.
+
+    finalize_job_outputs inserts output rows one mapping at a time. When it
+    crashed on the second of five mappings, one output row existed -- and the
+    resume inference read "outputs exist" as "naming succeeded", went to
+    copying, copied the one file, declared the job done, and the reclaim then
+    deleted the four rips that had never been finalized. One episode reached
+    the NAS; three had to be re-ripped from the disc.
+    """
+
+    def _stage(self, *, mappings: int, outputs: int, media_type: str = "tv") -> str:
+        from autorippr import pipeline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = build_config(Path(tmp))
+            conn = open_db(cfg.db_path)
+            try:
+                job_id = create_job(conn, disc_label="MIH", media_type=media_type)
+                for index in range(max(mappings, 1)):
+                    rip_id = conn.execute(
+                        "INSERT INTO rip_titles (job_id, title_id, duration_seconds, source_file) VALUES (?,?,?,?)",
+                        (job_id, index, 1500.0, str(Path(tmp) / f"t{index}.mkv")),
+                    ).lastrowid
+                    if index < mappings:
+                        conn.execute(
+                            """
+                            INSERT INTO episode_mappings (
+                                job_id, rip_title_id, season_number, episode_start, episode_end,
+                                tmdb_episode_ids_json, episode_titles_json, confidence, reason,
+                                manual_override, needs_split
+                            ) VALUES (?,?,?,?,?,'[]','[]',0.9,'test',1,0)
+                            """,
+                            (job_id, rip_id, 1, index + 1, index + 1),
+                        )
+                for index in range(outputs):
+                    conn.execute(
+                        "INSERT INTO outputs (job_id, local_path, transfer_status) VALUES (?,?,?)",
+                        (job_id, str(Path(tmp) / f"out{index}.mkv"), "pending"),
+                    )
+                conn.commit()
+                return pipeline._infer_resume_stage(conn, get_job(conn, job_id))
+            finally:
+                conn.close()
+
+    def test_the_incident_one_output_for_five_mappings_goes_back_to_renaming(self) -> None:
+        self.assertEqual(self._stage(mappings=5, outputs=1), "renaming")
+
+    def test_a_fully_finalized_job_still_resumes_at_copying(self) -> None:
+        self.assertEqual(self._stage(mappings=5, outputs=5), "copying")
+
+    def test_split_mappings_may_have_more_outputs_than_rows(self) -> None:
+        self.assertEqual(self._stage(mappings=2, outputs=4), "copying")
+
+    def test_a_movie_with_an_output_is_unaffected(self) -> None:
+        # Movies have no episode mappings; their one output means the copy
+        # really is all that is left.
+        self.assertEqual(self._stage(mappings=0, outputs=1, media_type="movie"), "copying")
