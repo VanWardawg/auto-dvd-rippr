@@ -19,6 +19,8 @@ import {
   buildEpisodeChoices,
   buildGuidedReviewRows,
   filterEpisodeChoices,
+  findDuplicateAssignments,
+  splitMappingReason,
   coerceConfigDraft,
   episodeLabel,
   fileNameFromPath,
@@ -604,5 +606,98 @@ describe("episode search choices", () => {
   it("a blank query filters nothing", () => {
     const choices = buildEpisodeChoices(crossSeason);
     expect(filterEpisodeChoices(choices, "  ")).toHaveLength(3);
+  });
+});
+
+describe("splitMappingReason", () => {
+  const OCR_REASON =
+    "OCR fallback matched on-screen text from ripped title file D2_t05.mkv to episode 'The Library' (score=1.00). " +
+    "OCR screenshot: C:\\autorippr\\staging\\jobs\\08c7\\ocr\\artifacts\\rip_title_1129_best.png " +
+    "OCR text: C:\\autorippr\\staging\\jobs\\08c7\\ocr\\artifacts\\rip_title_1129_best.txt " +
+    "Single episode inferred from duration.";
+
+  it("pulls both evidence paths out of the prose", () => {
+    const parts = splitMappingReason(OCR_REASON);
+    expect(parts.screenshotPath).toMatch(/rip_title_1129_best\.png$/);
+    expect(parts.textPath).toMatch(/rip_title_1129_best\.txt$/);
+  });
+
+  it("the summary keeps the sentences and loses the paths", () => {
+    const parts = splitMappingReason(OCR_REASON);
+    expect(parts.summary).toContain("The Library");
+    expect(parts.summary).toContain("Single episode inferred");
+    expect(parts.summary).not.toContain("C:\\");
+  });
+
+  it("survives a staging root with spaces in it", () => {
+    // Paths are bounded by their extensions, not by whitespace.
+    const parts = splitMappingReason(
+      "Matched. OCR screenshot: C:\\Users\\Pat Smith\\shot one.png OCR text: C:\\Users\\Pat Smith\\read one.txt Done.",
+    );
+    expect(parts.screenshotPath).toBe("C:\\Users\\Pat Smith\\shot one.png");
+    expect(parts.textPath).toBe("C:\\Users\\Pat Smith\\read one.txt");
+    expect(parts.summary).toBe("Matched. Done.");
+  });
+
+  it("translates the machine tokens a human should not read raw", () => {
+    expect(splitMappingReason("manual_override_cli").summary).toBe("Assigned by hand");
+    expect(splitMappingReason("manual_ignore_cli").summary).toBe("Ignored by hand");
+  });
+
+  it("plain prose passes through untouched", () => {
+    const parts = splitMappingReason("Single episode inferred from disc title sequence.");
+    expect(parts.summary).toBe("Single episode inferred from disc title sequence.");
+    expect(parts.screenshotPath).toBeNull();
+  });
+
+  it("an empty reason yields an empty summary, not a crash", () => {
+    expect(splitMappingReason(null).summary).toBe("");
+    expect(splitMappingReason("").screenshotPath).toBeNull();
+  });
+});
+
+describe("findDuplicateAssignments", () => {
+  const row = (id: string, season: string, start: string, end: string, status: "map" | "ignore" = "map") => ({
+    mappingId: id,
+    ripTitleId: id,
+    sourceFile: `${id}.mkv`,
+    status,
+    seasonNumber: season,
+    episodeStart: start,
+    episodeEnd: end,
+    durationMinutes: "24.0",
+    chapterCount: "7",
+    confidence: "0.97",
+    reason: "",
+  });
+
+  it("two files on the same episode are both flagged", () => {
+    const dups = findDuplicateAssignments([row("a", "3", "12", "12"), row("b", "3", "12", "12")]);
+    expect(dups).toEqual(new Set(["a", "b"]));
+  });
+
+  it("overlapping ranges count, not just exact matches", () => {
+    const dups = findDuplicateAssignments([row("a", "1", "2", "4"), row("b", "1", "4", "5")]);
+    expect(dups.size).toBe(2);
+  });
+
+  it("the same episode number in different seasons is fine", () => {
+    // The compilation case: S1E2 and S3E2 are different episodes.
+    const dups = findDuplicateAssignments([row("a", "1", "2", "2"), row("b", "3", "2", "2")]);
+    expect(dups.size).toBe(0);
+  });
+
+  it("ignored rows never collide", () => {
+    const dups = findDuplicateAssignments([row("a", "3", "12", "12"), row("b", "3", "12", "12", "ignore")]);
+    expect(dups.size).toBe(0);
+  });
+
+  it("distinct assignments raise no flags", () => {
+    const dups = findDuplicateAssignments([
+      row("a", "3", "12", "12"),
+      row("b", "3", "13", "13"),
+      row("c", "4", "12", "12"),
+    ]);
+    expect(dups.size).toBe(0);
   });
 });

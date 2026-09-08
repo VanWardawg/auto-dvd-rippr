@@ -51,6 +51,8 @@ import {
   buildEpisodeChoices,
   buildGuidedReviewRows,
   filterEpisodeChoices,
+  findDuplicateAssignments,
+  splitMappingReason,
   buildGuidedSplitDrafts,
   coerceConfigDraft,
   episodeLabel,
@@ -970,6 +972,10 @@ export default function App() {
     if (crossSeason) return [];
     return episodeChoices.map((choice) => ({ value: String(choice.episode), label: choice.label }));
   }, [episodeChoices]);
+  const duplicateAssignmentIds = useMemo(
+    () => findDuplicateAssignments(guidedReviewRows),
+    [guidedReviewRows],
+  );
 
   function runSelectedAction(name: string, fn: (jobId: string) => Promise<void>) {
     if (!selectedJobId) return;
@@ -2789,6 +2795,12 @@ export default function App() {
                       </button>
                     </div>
                   </div>
+                  {duplicateAssignmentIds.size > 0 && (
+                    <div className="review-banner">
+                      Two or more files claim the same episode — they would fight over one filename
+                      on the NAS. The rows are marked below; saving is allowed in case you mean it.
+                    </div>
+                  )}
 
                   {guidedReviewRows.length > 0 ? (
                     <div className="guided-review-table-wrap">
@@ -2809,10 +2821,7 @@ export default function App() {
                         </thead>
                         <tbody>
                           {guidedReviewRows.map((row) => (
-                            <tr
-                              key={row.ripTitleId}
-                              className={row.status === "ignore" || Number(row.confidence || 0) < 0.85 ? "table-row-warning" : ""}
-                            >
+                            <tr key={row.ripTitleId} className={row.status === "ignore" ? "guided-review-ignored" : ""}>
                               <td>
                                 <button type="button" onClick={() => void openPath(row.sourceFile)}>
                                   Play
@@ -2821,7 +2830,21 @@ export default function App() {
                               <td>{fileNameFromPath(row.sourceFile)}</td>
                               <td>{row.durationMinutes}m</td>
                               <td>{row.chapterCount}</td>
-                              <td>{row.confidence}</td>
+                              <td>
+                                {/* The full-row wash said "vaguely wrong"; the badge
+                                    points at the number that needs a second look. */}
+                                <span
+                                  className={`confidence-badge ${
+                                    row.status === "ignore" || row.confidence === "—"
+                                      ? ""
+                                      : Number(row.confidence) >= 0.85
+                                        ? "confidence-high"
+                                        : "confidence-low"
+                                  }`}
+                                >
+                                  {row.confidence}
+                                </span>
+                              </td>
                               <td>
                                 <select
                                   value={row.status}
@@ -2874,11 +2897,11 @@ export default function App() {
                                             episodeStart: choice ? String(choice.episode) : "",
                                             // Picking an episode names its season too.
                                             seasonNumber: choice?.season != null ? String(choice.season) : candidate.seasonNumber,
-                                            // A single-episode row's end follows its start.
-                                            episodeEnd:
-                                              choice && (candidate.episodeEnd === "" || candidate.episodeEnd === candidate.episodeStart)
-                                                ? String(choice.episode)
-                                                : candidate.episodeEnd,
+                                            // The end always follows a new start. Carrying an old
+                                            // end across a cross-season pick left E28..E5 -- an
+                                            // inverted range that crashed renaming. Widening back
+                                            // into a range is one click on the end cell.
+                                            episodeEnd: choice ? String(choice.episode) : "",
                                           }
                                         : candidate
                                     )));
@@ -2888,13 +2911,16 @@ export default function App() {
                               <td>
                                 <EpisodeSearchSelect
                                   choices={
-                                    // A range lives inside one season, so the end
-                                    // is picked from the start's season.
-                                    row.seasonNumber === ""
-                                      ? episodeChoices
-                                      : episodeChoices.filter(
-                                          (choice) => choice.season == null || String(choice.season) === row.seasonNumber,
-                                        )
+                                    // A range lives inside one season and runs
+                                    // forward, so the end is picked from the
+                                    // start's season, at or after the start.
+                                    episodeChoices.filter(
+                                      (choice) =>
+                                        (row.seasonNumber === "" ||
+                                          choice.season == null ||
+                                          String(choice.season) === row.seasonNumber) &&
+                                        (row.episodeStart === "" || choice.episode >= Number(row.episodeStart)),
+                                    )
                                   }
                                   seasonValue={row.seasonNumber}
                                   episodeValue={row.episodeEnd}
@@ -2907,8 +2933,34 @@ export default function App() {
                                     )));
                                   }}
                                 />
+                                {duplicateAssignmentIds.has(row.ripTitleId) && (
+                                  <div className="duplicate-warning">Also assigned to another file</div>
+                                )}
                               </td>
-                              <td>{row.reason || "—"}</td>
+                              <td className="guided-review-reason">
+                                {(() => {
+                                  const parts = splitMappingReason(row.reason);
+                                  return (
+                                    <>
+                                      <span>{parts.summary || "—"}</span>
+                                      {(parts.screenshotPath || parts.textPath) && (
+                                        <span className="reason-evidence">
+                                          {parts.screenshotPath && (
+                                            <button type="button" onClick={() => void openPath(parts.screenshotPath!)}>
+                                              Screenshot
+                                            </button>
+                                          )}
+                                          {parts.textPath && (
+                                            <button type="button" onClick={() => void openPath(parts.textPath!)}>
+                                              OCR text
+                                            </button>
+                                          )}
+                                        </span>
+                                      )}
+                                    </>
+                                  );
+                                })()}
+                              </td>
                             </tr>
                           ))}
                         </tbody>

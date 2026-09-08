@@ -1273,6 +1273,15 @@ def main() -> int:
                 int(selected_media["tmdb_id"]),
                 int(override_season),
             )
+            if args.episode_end < args.episode_start:
+                # An empty range would pass the resolution check below --
+                # zero requested, zero resolved -- and crash renaming later.
+                print(
+                    f"Episode range E{args.episode_start}..E{args.episode_end} is inverted; "
+                    "the end episode must not come before the start.",
+                    file=sys.stderr,
+                )
+                return 7
             selected_numbers = list(range(args.episode_start, args.episode_end + 1))
             eps = [
                 int(ep["id"])

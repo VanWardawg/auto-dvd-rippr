@@ -1306,12 +1306,74 @@ input::placeholder {
 
 .guided-review-table-wrap {
   overflow: auto;
+  /* Bounded so the sticky header has something to stick within. */
+  max-height: 62vh;
+}
+
+.guided-review-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--bg-surface-2);
+}
+
+.guided-review-table td {
+  vertical-align: top;
 }
 
 .guided-review-table select,
 .guided-review-table input {
   width: 100%;
   min-width: 110px;
+}
+
+/* An ignored row fades rather than alarms -- it is a decision, not a problem. */
+.guided-review-ignored td {
+  opacity: 0.55;
+}
+
+/* The evidence paths used to be six wrapped lines of C:\autorippr\...; the
+   summary keeps the sentences and the paths become open buttons. */
+.guided-review-reason {
+  max-width: 340px;
+  min-width: 220px;
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+
+.reason-evidence {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+}
+
+.reason-evidence button {
+  font-size: 0.9em;
+  padding: 0.15rem 0.5rem;
+  font-weight: normal;
+}
+
+.confidence-badge {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+}
+
+.confidence-high {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.confidence-low {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.duplicate-warning {
+  margin-top: 0.3rem;
+  font-size: 0.8em;
+  color: var(--warn);
 }
 
 /* --------------------------------------------------------------- banners */

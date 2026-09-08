@@ -456,6 +456,14 @@ def set_mapping_override(
     to a row sitting in season 3. Passing None keeps the row's own season,
     which is the right answer for an ordinary disc.
     """
+    if episode_end < episode_start:
+        # An inverted range resolves to zero episodes, and range() being empty
+        # let one sail through every later count check until renaming crashed
+        # on it. Refuse it here, where the caller can still fix the input.
+        raise MappingError(
+            f"Episode range E{episode_start}..E{episode_end} is inverted; "
+            "the end episode must not come before the start."
+        )
     row = conn.execute(
         "SELECT id, job_id, season_number FROM episode_mappings WHERE id = ?",
         (mapping_id,),

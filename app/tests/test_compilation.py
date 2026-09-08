@@ -277,6 +277,79 @@ class CrossSeasonNamingTests(unittest.TestCase):
         self.assertEqual(len(written), 3)
 
 
+class InvertedRangeTests(unittest.TestCase):
+    """
+    The I Heart Minnie save. Picking a new cross-season start in the review
+    left the old end behind, so two rows saved as S2 E10..E2 and S3 E28..E5.
+    range(28, 6) is empty, which meant every count check downstream compared
+    zero requested against zero resolved and passed -- until renaming indexed
+    into an empty title list and the job died with a bare IndexError that
+    named no row.
+
+    Three layers each refuse it now: the review UI resets the end when the
+    start moves (tested in lib.test.ts), the override call refuses to store an
+    inverted range, and the finalizer names the bad row instead of crashing.
+    """
+
+    def test_the_override_refuses_an_inverted_range(self) -> None:
+        from autorippr.mapper import MappingError, set_mapping_override
+
+        # The guard fires before the database is touched, so no fixtures.
+        with self.assertRaises(MappingError) as caught:
+            set_mapping_override(None, None, 279, 28, 5, [], "manual_override_cli")
+        self.assertIn("inverted", str(caught.exception))
+
+    def _finalize_rows(self, rows):
+        import json as _json
+        import tempfile
+        from autorippr.db import open_db
+        from autorippr.naming import _finalize_tv
+        from autorippr.state import create_job
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        conn = open_db(str(root / "a.db"))
+        self.addCleanup(conn.close)
+        job_id = create_job(conn, disc_label="MIH", media_type="tv", disc_scope="compilation")
+        source_dir = root / "src"
+        source_dir.mkdir()
+        for index, (season, start, end, name) in enumerate(rows):
+            mkv = source_dir / f"t{index:02d}.mkv"
+            mkv.write_text("data")
+            rip_id = conn.execute(
+                "INSERT INTO rip_titles (job_id, title_id, duration_seconds, source_file) VALUES (?,?,?,?)",
+                (job_id, index, 1500.0, str(mkv)),
+            ).lastrowid
+            conn.execute(
+                """
+                INSERT INTO episode_mappings (
+                    job_id, rip_title_id, season_number, episode_start, episode_end,
+                    tmdb_episode_ids_json, episode_titles_json, confidence, reason,
+                    manual_override, needs_split
+                ) VALUES (?,?,?,?,?,?,?,?,?,1,0)
+                """,
+                (job_id, rip_id, season, start, end, "[]", _json.dumps([name]), 0.9, "test"),
+            )
+        conn.commit()
+        cfg = SimpleNamespace(collision_policy="skip")
+        return _finalize_tv(conn, cfg, job_id, root / "out", "Mickey Mouse Clubhouse (2006)", 1)
+
+    def test_the_finalizer_names_the_bad_row_instead_of_crashing(self) -> None:
+        from autorippr.naming import NamingError
+
+        with self.assertRaises(NamingError) as caught:
+            self._finalize_rows([(3, 28, 5, "Minnie and Daisy's Flower Shower")])
+        message = str(caught.exception)
+        self.assertIn("E28..E5", message)
+        self.assertNotIn("index out of range", message)
+
+    def test_a_forward_range_still_finalizes(self) -> None:
+        items = self._finalize_rows([(3, 28, 28, "Minnie and Daisy's Flower Shower")])
+        self.assertEqual(len(items), 1)
+        self.assertIn("s03e28", items[0]["local_path"])
+
+
 class CompilationAlwaysReviewedTests(unittest.TestCase):
     """
     Position is evidence on an ordinary disc and noise on a compilation.

@@ -196,6 +196,15 @@ def _finalize_tv(conn, cfg: AppConfig, job_id: str, finalize_root: Path, title_y
         season_dir = finalize_root / title_year / f"Season {season_no:02d}"
         season_dir.mkdir(parents=True, exist_ok=True)
         eps = list(range(int(m["episode_start"]), int(m["episode_end"]) + 1))
+        if not eps:
+            # An inverted range resolves to no episodes at all. Naming a file
+            # after nothing is not recoverable here, and skipping it would
+            # quietly leave an episode off the NAS -- so stop with a message
+            # that says which row to fix instead of an IndexError below.
+            raise NamingError(
+                f"Mapping {m['id']} has an inverted episode range "
+                f"E{m['episode_start']}..E{m['episode_end']}; fix that row in the review and resume."
+            )
         titles_json = json.loads(m["episode_titles_json"] or "[]")
         ep_titles = [
             str(titles_json[i]) if i < len(titles_json) and titles_json[i] else f"Episode {ep}"

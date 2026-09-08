@@ -71,6 +71,78 @@ export function buildEpisodeChoices(episodes: SeasonEpisodeOption[]): EpisodeCho
     .sort((a, b) => (a.season ?? 0) - (b.season ?? 0) || a.episode - b.episode);
 }
 
+/**
+ * A mapping reason split into what a reviewer reads and what they can open.
+ *
+ * The mapper writes evidence paths into its reason text -- an OCR screenshot
+ * and the text read off it. Six lines of C:\autorippr\... made every review
+ * row two hundred pixels tall while saying nothing a person can use in place;
+ * the paths become open buttons and the sentences stay.
+ */
+export type MappingReasonParts = {
+  summary: string;
+  screenshotPath: string | null;
+  textPath: string | null;
+};
+
+const REASON_TRANSLATIONS: Record<string, string> = {
+  manual_override_cli: "Assigned by hand",
+  manual_ignore_cli: "Ignored by hand",
+  manual_source_override_cli: "Source file chosen by hand",
+};
+
+export function splitMappingReason(reason: string | null | undefined): MappingReasonParts {
+  const raw = (reason ?? "").trim();
+  if (!raw) return { summary: "", screenshotPath: null, textPath: null };
+  if (REASON_TRANSLATIONS[raw]) {
+    return { summary: REASON_TRANSLATIONS[raw], screenshotPath: null, textPath: null };
+  }
+  // Paths may contain spaces, so they are bounded by their extensions.
+  const screenshot = raw.match(/OCR screenshot:\s*(.+?\.png)/i);
+  const text = raw.match(/OCR text:\s*(.+?\.txt)/i);
+  const summary = raw
+    .replace(/OCR screenshot:\s*.+?\.png/i, "")
+    .replace(/OCR text:\s*.+?\.txt/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return {
+    summary,
+    screenshotPath: screenshot ? screenshot[1] : null,
+    textPath: text ? text[1] : null,
+  };
+}
+
+/**
+ * Rip files whose episode assignments collide.
+ *
+ * Two files claiming S3E12 is always a mistake -- they would race for one
+ * filename on the NAS -- but the review table happily saved it and nothing
+ * said so until the copy. Returns the ripTitleIds of every row whose season
+ * and episode span overlaps another mapped row's.
+ */
+export function findDuplicateAssignments(rows: GuidedReviewRowDraft[]): Set<string> {
+  const mapped = rows
+    .filter((row) => row.status === "map")
+    .map((row) => ({
+      id: row.ripTitleId,
+      season: row.seasonNumber === "" ? null : Number(row.seasonNumber),
+      start: Number(row.episodeStart),
+      end: Number(row.episodeEnd === "" ? row.episodeStart : row.episodeEnd),
+    }))
+    .filter((row) => row.season !== null && Number.isFinite(row.start) && row.start > 0);
+  const duplicates = new Set<string>();
+  for (const a of mapped) {
+    for (const b of mapped) {
+      if (a.id === b.id || a.season !== b.season) continue;
+      if (a.start <= b.end && b.start <= a.end) {
+        duplicates.add(a.id);
+        duplicates.add(b.id);
+      }
+    }
+  }
+  return duplicates;
+}
+
 /** Case-insensitive match of every whitespace-separated term against the label. */
 export function filterEpisodeChoices(choices: EpisodeChoice[], query: string): EpisodeChoice[] {
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
