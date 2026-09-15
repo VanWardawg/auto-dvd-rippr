@@ -173,5 +173,89 @@ class NasAvailabilityTests(unittest.TestCase):
                 conn.close()
 
 
+class ExistingDestinationTests(unittest.TestCase):
+    """
+    An existing NAS destination is only a conflict when the contents differ.
+
+    Re-ripping the I Heart Minnie disc re-produced two episodes an earlier
+    disc had already banked. The transfer refused both -- correctly declining
+    to overwrite -- but recorded them as errors, which errored the whole job
+    even though its three genuinely new episodes had copied fine. Identical
+    bytes under the identical name are not a conflict; they are the transfer's
+    goal already met. A destination with *different* content stays an error,
+    because choosing which file survives is a human's call.
+    """
+
+    def _run_transfer(self, *, nas_payload: bytes | None):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        cfg = build_config(root)
+        (root / "nas").mkdir()
+        conn = open_db(cfg.db_path)
+        self.addCleanup(conn.close)
+
+        job_id = create_job(conn, disc_label="MIH-0N-NW1.1_DES", media_type="tv")
+        finalized = root / "jobs" / job_id / "finalized" / "Show (2006)" / "Season 01"
+        finalized.mkdir(parents=True)
+        local = finalized / "Show (2006) - s01e08 - Minnie's Birthday.mkv"
+        local.write_bytes(PAYLOAD)
+
+        nas_file = (
+            root / "nas" / "TVShows" / "Show (2006)" / "Season 01"
+            / "Show (2006) - s01e08 - Minnie's Birthday.mkv"
+        )
+        if nas_payload is not None:
+            nas_file.parent.mkdir(parents=True)
+            nas_file.write_bytes(nas_payload)
+
+        conn.execute(
+            "INSERT INTO outputs (job_id, local_path, transfer_status) VALUES (?,?,?)",
+            (job_id, str(local), "pending"),
+        )
+        conn.commit()
+        result = transfer_job_outputs(conn, cfg, job_id)
+        row = conn.execute(
+            "SELECT transfer_status, checksum_sha256, last_error FROM outputs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        return result, row, nas_file
+
+    def test_an_identical_existing_file_counts_as_transferred(self) -> None:
+        result, row, _ = self._run_transfer(nas_payload=PAYLOAD)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(len(result["copied"]), 1)
+        self.assertTrue(result["copied"][0]["already_present"])
+        self.assertEqual(row["transfer_status"], "done")
+
+    def test_the_recorded_checksum_describes_the_content(self) -> None:
+        _, row, _ = self._run_transfer(nas_payload=PAYLOAD)
+        self.assertEqual(row["checksum_sha256"], hashlib.sha256(PAYLOAD).hexdigest())
+
+    def test_different_content_is_still_refused(self) -> None:
+        # The half of the behaviour that must not soften: a name collision
+        # with different bytes means something is misidentified somewhere.
+        result, row, _ = self._run_transfer(nas_payload=b"a different episode entirely")
+        self.assertEqual(result["copied"], [])
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("destination_exists", result["errors"][0]["error"])
+        self.assertEqual(row["transfer_status"], "error")
+
+    def test_the_existing_file_is_never_modified(self) -> None:
+        # Refusing to overwrite is the invariant; the dedupe must not dent it.
+        for payload in (PAYLOAD, b"a different episode entirely"):
+            with self.subTest(identical=payload == PAYLOAD):
+                _, _, nas_file = self._run_transfer(nas_payload=payload)
+                self.assertEqual(nas_file.read_bytes(), payload)
+
+    def test_a_missing_destination_still_copies_normally(self) -> None:
+        result, row, nas_file = self._run_transfer(nas_payload=None)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(len(result["copied"]), 1)
+        self.assertNotIn("already_present", result["copied"][0])
+        self.assertEqual(row["transfer_status"], "done")
+        self.assertEqual(nas_file.read_bytes(), PAYLOAD)
+
+
 if __name__ == "__main__":
     unittest.main()

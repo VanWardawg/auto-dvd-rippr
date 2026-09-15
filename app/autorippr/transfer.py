@@ -93,13 +93,54 @@ def transfer_job_outputs(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
             ) from exc
         recorded_nas_path = str(row["nas_path"] or "").strip()
         if nas_final.exists() and recorded_nas_path != str(nas_final):
+            # An existing destination is usually a conflict -- but not always.
+            # Re-ripping the I Heart Minnie disc re-produced two episodes an
+            # earlier disc had already banked, and the refusal errored the
+            # whole job even though the same bytes already sat under the same
+            # name. Identical content is not a conflict; it is work already
+            # done. Different content still is one, and stays a human's call.
+            local_checksum = _sha256(local_path)
+            try:
+                nas_checksum = _sha256(nas_final)
+            except OSError:
+                # Unreadable remote file: treat as the conflict it may be.
+                nas_checksum = None
+            if nas_checksum == local_checksum:
+                conn.execute(
+                    """
+                    UPDATE outputs
+                    SET nas_path = ?, checksum_sha256 = ?, transfer_status = 'done',
+                        transfer_attempts = transfer_attempts + 1, last_error = NULL
+                    WHERE id = ?
+                    """,
+                    (str(nas_final), local_checksum, out_id),
+                )
+                _record_attempt(conn, out_id, "success", "already_on_nas_checksums_match")
+                append_job_log(
+                    conn,
+                    job_id,
+                    "INFO",
+                    f"Already on NAS with matching checksum; nothing to copy: {nas_final.name}",
+                    None,
+                    None,
+                )
+                copied.append(
+                    {
+                        "output_id": out_id,
+                        "nas_path": str(nas_final),
+                        "checksum_sha256": local_checksum,
+                        "already_present": True,
+                    }
+                )
+                conn.commit()
+                continue
             message = f"destination_exists:{nas_final}"
             append_job_log(
                 conn,
                 job_id,
                 "ERROR",
                 (
-                    "NAS destination already exists; refusing to overwrite. "
+                    "NAS destination already exists with different content; refusing to overwrite. "
                     "Review TMDB selection or move/remap the existing remote file first."
                 ),
                 None,
