@@ -1866,6 +1866,11 @@ export default function App() {
                   </span>
                   <span>{formatRelativeTime(job.updated_at)}</span>
                 </div>
+                {job.status === "error" && job.error_message ? (
+                  <div className="job-row-error" title={job.error_message}>
+                    {job.error_message}
+                  </div>
+                ) : null}
               </button>
             ))}
           </div>
@@ -2046,6 +2051,14 @@ export default function App() {
                   );
                 })}
               </div>
+              {/* The backend records exactly why a job stopped -- "NAS root
+                  Y:\ is not reachable..." -- and this line was the only thing
+                  missing between the user and that answer. */}
+              {snapshot.job.status === "error" && snapshot.job.error_message ? (
+                <div className="error-banner job-error-message">
+                  {snapshot.job.error_message}
+                </div>
+              ) : null}
             </div>
           </section>
         ) : null}

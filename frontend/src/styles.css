@@ -1376,6 +1376,23 @@ input::placeholder {
   color: var(--warn);
 }
 
+/* Why a job stopped, in the words the backend recorded. The card gets the
+   first two lines; the job detail shows the full message under the stages. */
+.job-row-error {
+  margin-top: 0.35rem;
+  font-size: 0.8em;
+  color: var(--danger);
+  text-align: left;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.job-error-message {
+  margin-top: 0.75rem;
+}
+
 /* --------------------------------------------------------------- banners */
 
 .empty-state,
