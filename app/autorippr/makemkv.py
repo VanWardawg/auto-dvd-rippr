@@ -122,6 +122,59 @@ class TitleSelection:
         return not self.skipped
 
 
+def typical_episode_runtime_minutes(runtimes: list[float]) -> float | None:
+    """
+    The runtime a show's episodes actually have, from TMDB's per-episode data.
+
+    Median rather than mean, because a season's list often carries one
+    double-length opener or a zero for an episode nobody filled in.
+    Returns None when there is nothing usable to say.
+    """
+    usable = sorted(r for r in runtimes if r and r > 0)
+    if not usable:
+        return None
+    mid = len(usable) // 2
+    if len(usable) % 2:
+        return float(usable[mid])
+    return (usable[mid - 1] + usable[mid]) / 2.0
+
+
+def adaptive_episode_window(
+    typical_runtime_minutes: float | None,
+    config_min_minutes: float,
+    config_max_minutes: float,
+) -> tuple[float, float]:
+    """
+    Fit the episode-length window to the show being ripped.
+
+    The configured window assumes broadcast-length episodes. Bluey's run 7
+    minutes, so a 10-minute floor skipped all 26 episodes on a season disc and
+    kept only the play-all -- the selection did exactly what it was told and
+    ripped nothing usable. When the show was identified before the rip (the
+    TV path always is), TMDB knows the real runtime; a floor at 60% of it
+    keeps every episode while still dropping logos and trailers, which run a
+    minute or two.
+
+    The floor only ever moves DOWN: a show with long episodes never tightens
+    the window past what the user configured, and 2 minutes is the hard
+    bottom so junk stays excluded even for the shortest shows.
+
+    When the floor does move, the ceiling moves with it: against 7-minute
+    episodes, a configured 90-minute ceiling would admit a 56-minute play-all
+    as an "episode", hiding it from play-all detection entirely. Three
+    episode-lengths keeps genuine double and triple titles in the window (the
+    splitter handles those) while anything larger faces the play-all
+    arithmetic. A show whose floor did not move keeps the user's ceiling.
+    """
+    if not typical_runtime_minutes or typical_runtime_minutes <= 0:
+        return config_min_minutes, config_max_minutes
+    floor = max(2.0, typical_runtime_minutes * 0.6)
+    if floor >= config_min_minutes:
+        return config_min_minutes, config_max_minutes
+    ceiling = min(config_max_minutes, max(typical_runtime_minutes * 3.0, floor * 4.0))
+    return floor, ceiling
+
+
 def select_titles(
     candidates: list[TitleCandidate],
     *,

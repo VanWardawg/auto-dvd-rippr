@@ -18,10 +18,12 @@ from typing import Any
 from .config import AppConfig
 from .makemkv import (
     PROGRESS_MAX,
+    adaptive_episode_window,
     build_title_candidates,
     overall_fraction,
     parse_progress_line,
     select_titles,
+    typical_episode_runtime_minutes,
 )
 from .progress import clear_progress, upsert_progress
 from .logger import get_logger
@@ -575,6 +577,38 @@ def _ensure_space_for_rip(
     )
 
 
+def _tmdb_episode_runtime_minutes(conn, cfg: AppConfig, job: dict[str, Any]) -> float | None:
+    """
+    What TMDB says this show's episodes run, for fitting the selection window.
+
+    Only a TV job identified before its rip can answer -- which the TV path
+    always is. Best effort throughout: a rip must never be blocked by a
+    runtime lookup, so any failure here just means the configured window.
+    """
+    if str(job.get("media_type") or "tv") != "tv":
+        return None
+    try:
+        selected = conn.execute(
+            """
+            SELECT tmdb_id, season_number FROM job_selected_media
+            WHERE job_id = ? AND media_type = 'tv'
+            LIMIT 1
+            """,
+            (str(job["id"]),),
+        ).fetchone()
+        if not selected:
+            return None
+        season = job.get("season_number") or selected["season_number"] or 1
+        from .tmdb import fetch_tmdb_tv_episodes
+
+        episodes = fetch_tmdb_tv_episodes(conn, cfg, int(selected["tmdb_id"]), int(season))
+        return typical_episode_runtime_minutes(
+            [float(ep.get("runtime") or 0) for ep in episodes]
+        )
+    except Exception:  # noqa: BLE001 -- enrichment only; the rip proceeds either way
+        return None
+
+
 def _plan_title_selection(
     conn,
     cfg: AppConfig,
@@ -607,12 +641,29 @@ def _plan_title_selection(
 
     job = get_job(conn, job_id) or {}
     candidates = build_title_candidates(disc_info_by_title)
+    typical_runtime = _tmdb_episode_runtime_minutes(conn, cfg, job)
+    min_minutes, max_minutes = adaptive_episode_window(
+        typical_runtime, cfg.min_episode_minutes, cfg.max_episode_minutes
+    )
+    if min_minutes < cfg.min_episode_minutes:
+        append_job_log(
+            conn=conn,
+            job_id=job_id,
+            level="INFO",
+            message=(
+                f"TMDB says this show's episodes run ~{typical_runtime:.0f} min; "
+                f"accepting titles down to {min_minutes:.0f} min instead of the "
+                f"configured {cfg.min_episode_minutes:.0f}."
+            ),
+            from_status=None,
+            to_status=None,
+        )
     selection = select_titles(
         candidates,
         media_type=str(job.get("media_type") or "tv"),
         movie_mode=str(job.get("movie_mode") or "single"),
-        min_episode_minutes=cfg.min_episode_minutes,
-        max_episode_minutes=cfg.max_episode_minutes,
+        min_episode_minutes=min_minutes,
+        max_episode_minutes=max_minutes,
     )
 
     append_job_log(

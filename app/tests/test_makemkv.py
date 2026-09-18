@@ -23,11 +23,13 @@ import autorippr.rip as rip  # noqa: E402
 from autorippr.config import AppConfig  # noqa: E402
 from autorippr.makemkv import (  # noqa: E402
     TitleCandidate,
+    adaptive_episode_window,
     build_title_candidates,
     overall_fraction,
     parse_duration,
     parse_progress_line,
     select_titles,
+    typical_episode_runtime_minutes,
 )
 
 
@@ -676,3 +678,78 @@ class SubsetRuntimeTests(unittest.TestCase):
         from autorippr.makemkv import matches_subset_runtime
 
         self.assertFalse(matches_subset_runtime(120.0 * 60, []))
+
+
+class ShortEpisodeWindowTests(unittest.TestCase):
+    """
+    The Bluey disc: 27 titles, 26 of them 7-minute episodes, one play-all.
+
+    The configured 10-minute floor assumes broadcast-length episodes, so the
+    selection skipped every real episode and kept only the play-all -- doing
+    exactly what it was told, and ripping nothing usable. The show had been
+    identified before the rip (the TV path always is), so TMDB already knew
+    the episodes run 7 minutes; the window now bends to that.
+    """
+
+    def test_a_short_show_lowers_the_floor_and_the_ceiling(self) -> None:
+        # The ceiling matters as much as the floor: at 90 minutes it admitted
+        # the 56-minute play-all as an "episode", hiding it from play-all
+        # detection. Three episode-lengths keeps real double and triple
+        # titles while play-alls face the arithmetic.
+        low, high = adaptive_episode_window(7.0, 10.0, 90.0)
+        self.assertAlmostEqual(low, 4.2)
+        self.assertAlmostEqual(high, 21.0)
+
+    def test_a_broadcast_show_keeps_the_configured_floor(self) -> None:
+        # 60% of 22 minutes is above 10; the user's setting still wins.
+        self.assertEqual(adaptive_episode_window(22.0, 10.0, 90.0), (10.0, 90.0))
+
+    def test_the_floor_never_rises_above_the_config(self) -> None:
+        # A 45-minute drama must not tighten the window past what the user
+        # chose -- adaptation only ever widens.
+        self.assertEqual(adaptive_episode_window(45.0, 10.0, 90.0), (10.0, 90.0))
+
+    def test_two_minutes_is_the_hard_bottom(self) -> None:
+        # Even a webisode show keeps logos and trailers excluded.
+        low, _ = adaptive_episode_window(1.5, 10.0, 90.0)
+        self.assertEqual(low, 2.0)
+
+    def test_no_runtime_means_no_change(self) -> None:
+        self.assertEqual(adaptive_episode_window(None, 10.0, 90.0), (10.0, 90.0))
+        self.assertEqual(adaptive_episode_window(0.0, 10.0, 90.0), (10.0, 90.0))
+
+    def test_the_bluey_disc_now_selects_its_episodes(self) -> None:
+        candidates = [title(i, 7.0) for i in range(1, 9)] + [title(9, 56.2, name="play all")]
+        low, high = adaptive_episode_window(7.0, 10.0, 90.0)
+        selection = select_titles(
+            candidates, media_type="tv", min_episode_minutes=low, max_episode_minutes=high
+        )
+        self.assertEqual(selection.title_ids, list(range(1, 9)))
+        self.assertTrue(any("play all" in s for s in selection.skipped))
+
+    def test_what_the_old_floor_did_with_this_disc(self) -> None:
+        # Documents the failure: with the 10-minute floor, no title is an
+        # episode, the play-all is not recognised (there are no episodes to
+        # sum), and a >90-minute play-all is kept as a lone "combined" title.
+        candidates = [title(i, 7.0) for i in range(1, 27)] + [title(27, 185.0, name="play all")]
+        selection = select_titles(
+            candidates, media_type="tv", min_episode_minutes=10.0, max_episode_minutes=90.0
+        )
+        self.assertEqual(selection.title_ids, [27])
+
+
+class TypicalRuntimeTests(unittest.TestCase):
+    def test_median_of_odd_count(self) -> None:
+        self.assertEqual(typical_episode_runtime_minutes([7.0, 7.0, 9.0]), 7.0)
+
+    def test_zeroes_and_gaps_are_not_data(self) -> None:
+        # TMDB lists a zero or null for episodes nobody filled in.
+        self.assertEqual(typical_episode_runtime_minutes([0.0, 7.0, 0.0, 7.0]), 7.0)
+
+    def test_a_double_length_opener_does_not_drag_the_answer(self) -> None:
+        runtimes = [14.0] + [7.0] * 10
+        self.assertEqual(typical_episode_runtime_minutes(runtimes), 7.0)
+
+    def test_nothing_usable_is_none(self) -> None:
+        self.assertIsNone(typical_episode_runtime_minutes([]))
+        self.assertIsNone(typical_episode_runtime_minutes([0.0, 0.0]))
