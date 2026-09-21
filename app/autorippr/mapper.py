@@ -27,6 +27,20 @@ class MappingError(RuntimeError):
 # whole season to a mismatch.
 RANGE_SLACK_EPISODES = 2
 
+# Verification of disc-order assignments reads the opening minutes of each
+# ripped title: kids' shows caption the spoken episode-title announcement
+# ("This episode of Bluey is called X") within the first couple of minutes,
+# and many shows render the title as on-screen text.
+VERIFY_EARLY_SECONDS = 150
+VERIFY_FRAME_INTERVAL_SECONDS = 2
+VERIFY_MAX_FRAMES_PER_SOURCE = 45
+# OCR only overrules disc order when it clearly names one particular other
+# episode: a confident match, and clearly better than any match the assigned
+# episode managed. "Dance Mode" read from a title assigned "Dance Mode Part
+# Two" is ambiguity, not a contradiction.
+POSITIONAL_VERIFY_MIN_SCORE = 0.80
+POSITIONAL_VERIFY_MARGIN = 0.10
+
 
 @dataclass(frozen=True)
 class EpisodeTarget:
@@ -302,6 +316,10 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
         )
         for e in episodes
     ]
+    # The full candidate list before any range windowing. Verification needs
+    # to be able to say "this file is actually E23" even when the user's
+    # stated disc range stopped well short of it.
+    verification_targets = targets
     disc_scope = str(selected["disc_scope"] or "")
     range_start = int(selected["episode_range_start"]) if selected["episode_range_start"] is not None else None
     range_end = int(selected["episode_range_end"]) if selected["episode_range_end"] is not None else None
@@ -342,6 +360,9 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
         rip_rows, targets, cfg, job_id, _job_disc_drive(conn, job_id),
         position_is_evidence=disc_scope_early != "compilation",
     )
+    verification = _verify_positional_assignments(
+        conn, cfg, job_id, planned, rip_rows, verification_targets
+    )
     # Rows are built at several points in the planner, so the season is derived
     # here from the episodes each row actually claims rather than threaded
     # through every one of them. For a normal disc every target shares a
@@ -376,6 +397,11 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
         (p["episode_start"] is not None and float(p["confidence"]) < 0.85)
         for p in planned
     )
+    if verification["contradicted"]:
+        # Position said one thing and the episode's own frames said another.
+        # The lowered per-row confidence already trips the threshold above,
+        # but a contradiction must reach a human even if that tuning changes.
+        needs_review = True
     if disc_scope_early == "compilation" and planned:
         # On an ordinary disc, position is evidence: title 3 is usually episode
         # 3. On a compilation it is nothing at all -- the episodes were picked
@@ -413,6 +439,7 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
         "mapping_count": len(planned),
         "needs_review": needs_review,
         "mappings": planned,
+        "verification": verification,
     }
 
 
@@ -760,6 +787,10 @@ def _plan_mappings(
                         "requested episode count, and the remaining titles are much shorter extras/alternates."
                     ),
                     "needs_split": False,
+                    # Position is the only evidence behind this row, so it is
+                    # the one kind of assignment the verification pass checks
+                    # against what the episode says about itself.
+                    "positional_fast_path": True,
                 }
             )
             continue
@@ -914,6 +945,246 @@ def _plan_mappings(
             }
         )
     return output
+
+
+def _verify_positional_assignments(
+    conn,
+    cfg: AppConfig,
+    job_id: str,
+    planned: list[dict[str, Any]],
+    rip_rows,
+    season_targets: list[EpisodeTarget],
+) -> dict[str, Any]:
+    """
+    Check disc-order assignments against what the episodes say about themselves.
+
+    The in-order fast path assigns titles to episodes purely by position, and
+    it was the one path with no evidence behind it at all. The Australian
+    "Bluey Season 3 First Half" DVD plays in a custom authoring order matching
+    neither TMDB nor the published disc listing; all 26 files mapped
+    confidently by position, 21 were wrong, and nobody noticed until the files
+    were already on the NAS. The rips themselves carried the answer the whole
+    time: the disc's subtitle track captions the spoken episode-title
+    announcement in the first two minutes, and many shows render the title as
+    on-screen text.
+
+    OCR that confidently names a *different* episode does not silently rewrite
+    the mapping -- OCR is also fallible. It drops the row's confidence,
+    records the other episode as the suggested assignment, and sends the job
+    to review with a log line naming the disagreement. Verification failing to
+    produce evidence (no subtitle track, nothing readable) changes nothing:
+    absence of evidence keeps the fast path exactly as it was.
+    """
+    summary: dict[str, Any] = {
+        "checked": 0,
+        "confirmed": 0,
+        "contradicted": 0,
+        "disagreements": [],
+    }
+    if not season_targets:
+        return summary
+    positional_rows = [
+        row
+        for row in planned
+        if row.get("positional_fast_path")
+        and row.get("episode_start") is not None
+        and row.get("tmdb_episode_ids")
+    ]
+    if not positional_rows:
+        return summary
+
+    source_by_rip_id = {int(r["id"]): str(r["source_file"] or "") for r in rip_rows}
+    for row in positional_rows:
+        rip_title_id = int(row["rip_title_id"])
+        source_file = source_by_rip_id.get(rip_title_id)
+        if not source_file:
+            continue
+        try:
+            texts = _collect_early_identity_text(cfg, job_id, source_file, rip_title_id)
+        except Exception:
+            # Verification is advisory. A crash gathering evidence must never
+            # take down a mapping that was fine before verification existed.
+            continue
+        if not texts:
+            continue
+
+        assigned_id = int(row["tmdb_episode_ids"][0])
+        best: dict[str, Any] | None = None
+        assigned_score = 0.0
+        for text in texts:
+            for match in _find_episode_title_matches_in_text(text, season_targets):
+                score = float(match["score"])
+                if match["episode"].tmdb_episode_id == assigned_id:
+                    assigned_score = max(assigned_score, score)
+                if best is None or score > float(best["score"]):
+                    best = match
+        if best is None:
+            continue
+
+        summary["checked"] += 1
+        best_episode: EpisodeTarget = best["episode"]
+        best_score = float(best["score"])
+        if best_episode.tmdb_episode_id == assigned_id:
+            summary["confirmed"] += 1
+            row["verification"] = {"status": "confirmed", "score": best_score}
+            continue
+        if (
+            best_score < POSITIONAL_VERIFY_MIN_SCORE
+            or best_score - assigned_score < POSITIONAL_VERIFY_MARGIN
+        ):
+            # The frames read as something, but not clearly enough as one
+            # particular other episode to overrule the disc order.
+            row["verification"] = {"status": "inconclusive", "score": best_score}
+            continue
+
+        assigned_title = (
+            str(row["episode_titles"][0])
+            if row.get("episode_titles")
+            else f"Episode {row['episode_start']}"
+        )
+        suggested_label = (
+            f"S{best_episode.season_number:02d}E{best_episode.episode_number:02d}"
+        )
+        row["verification"] = {
+            "status": "contradicted",
+            "score": best_score,
+            "suggested_season_number": best_episode.season_number,
+            "suggested_episode_number": best_episode.episode_number,
+            "suggested_tmdb_episode_id": best_episode.tmdb_episode_id,
+            "suggested_title": best_episode.title,
+        }
+        row["confidence"] = min(float(row["confidence"]), 0.40)
+        row["reason"] += (
+            f" Early-frame OCR read '{best_episode.title}' ({suggested_label}, "
+            f"score={best_score:.2f}) instead of the disc-order assignment "
+            f"'{assigned_title}'; suggested assignment: {suggested_label}."
+        )
+        summary["contradicted"] += 1
+        summary["disagreements"].append(
+            {
+                "rip_title_id": rip_title_id,
+                "source_file": Path(source_file).name,
+                "assigned_episode_number": int(row["episode_start"]),
+                "assigned_title": assigned_title,
+                "suggested_season_number": best_episode.season_number,
+                "suggested_episode_number": best_episode.episode_number,
+                "suggested_tmdb_episode_id": best_episode.tmdb_episode_id,
+                "suggested_title": best_episode.title,
+                "score": best_score,
+            }
+        )
+        append_job_log(
+            conn,
+            job_id,
+            "WARNING",
+            (
+                f"Positional mapping verification: {Path(source_file).name} was "
+                f"assigned '{assigned_title}' (E{int(row['episode_start'])}) by "
+                f"disc order, but its early frames read '{best_episode.title}' "
+                f"({suggested_label}, score={best_score:.2f}). Suggested "
+                f"assignment: {suggested_label}."
+            ),
+            None,
+            None,
+        )
+
+    if summary["checked"]:
+        append_job_log(
+            conn,
+            job_id,
+            "INFO",
+            (
+                f"Positional mapping verification: {summary['checked']} title(s) "
+                f"produced readable early-frame text; {summary['confirmed']} "
+                f"confirmed, {summary['contradicted']} contradicted the disc order."
+            ),
+            None,
+            None,
+        )
+    return summary
+
+
+def _collect_early_identity_text(
+    cfg: AppConfig,
+    job_id: str,
+    source_file: str,
+    rip_title_id: int,
+) -> list[str]:
+    """
+    OCR text from the opening minutes of one ripped title.
+
+    Two extraction passes, cheapest evidence first: the disc's own subtitle
+    track burned onto the video (kids' shows caption the spoken episode-title
+    announcement), then plain frames for shows that render the title as
+    on-screen text instead. Any failure -- missing tools, no subtitle track,
+    ffmpeg timing out, unreadable frames -- contributes nothing rather than
+    raising: verification treats absence of evidence as no evidence, never as
+    an error.
+    """
+    ffmpeg = Path(cfg.ffmpeg_path)
+    if not ffmpeg.exists():
+        return []
+    tesseract = _resolve_tesseract_executable()
+    if tesseract is None:
+        return []
+    src = Path(source_file)
+    if not src.exists():
+        return []
+
+    frame_filters = (
+        f"fps=1/{VERIFY_FRAME_INTERVAL_SECONDS},scale=1280:-1,"
+        f"eq=contrast=1.2:brightness=0.05"
+    )
+    passes = (
+        # Burning the first subtitle stream onto the video makes ffmpeg fail
+        # outright when the title has no subtitle track -- which is exactly
+        # the fallback working: the plain-frame pass still runs.
+        ("subtitle", "-filter_complex", f"[0:v][0:s:0]overlay,{frame_filters}"),
+        ("frames", "-vf", frame_filters),
+    )
+    work_root = (
+        Path(cfg.staging_root) / "jobs" / job_id / "ocr" / f"verify_title_{rip_title_id:04d}"
+    )
+    texts: list[str] = []
+    for tag, filter_flag, filter_value in passes:
+        frame_dir = work_root / tag
+        frame_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            cmd = [
+                str(ffmpeg),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(src),
+                "-t",
+                str(VERIFY_EARLY_SECONDS),
+                filter_flag,
+                filter_value,
+                str(frame_dir / "frame_%03d.png"),
+            ]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, timeout=300, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if proc.returncode != 0:
+                continue
+            frame_files = sorted(frame_dir.glob("frame_*.png"))
+            if len(frame_files) > VERIFY_MAX_FRAMES_PER_SOURCE:
+                stride = max(1, len(frame_files) // VERIFY_MAX_FRAMES_PER_SOURCE)
+                frame_files = frame_files[::stride][:VERIFY_MAX_FRAMES_PER_SOURCE]
+            for frame in frame_files:
+                try:
+                    text = _ocr_frame_text(tesseract, frame)
+                except (OSError, subprocess.TimeoutExpired):
+                    continue
+                if text.strip():
+                    texts.append(text)
+        finally:
+            shutil.rmtree(frame_dir, ignore_errors=True)
+    shutil.rmtree(work_root, ignore_errors=True)
+    return texts
 
 
 def _select_in_order_primary_episode_rows(rip_rows, target_count: int) -> list[Any]:
