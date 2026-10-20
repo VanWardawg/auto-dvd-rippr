@@ -103,6 +103,11 @@ export interface SelectedMovieSlot {
   updated_at?: string;
 }
 
+export interface MovieSlotSource {
+  slot_index: number;
+  rip_title_id: number;
+}
+
 export interface TmdbCandidate {
   tmdb_id: number;
   media_type: "tv" | "movie";
@@ -181,7 +186,9 @@ export interface JobSnapshot {
   job: JobSummary;
   logs: JobLog[];
   selected_media?: SelectedMedia | null;
-  selected_movies?: SelectedMovieSlot[]; 
+  selected_movies?: SelectedMovieSlot[];
+  // The rip title each movie slot will be named from -- picked or defaulted.
+  movie_slot_sources?: MovieSlotSource[];
   tmdb_candidates: TmdbCandidate[];
   episode_mappings: EpisodeMapping[];
   split_plans: SplitPlan[];

@@ -372,7 +372,13 @@ async fn get_tv_show_seasons(
 }
 
 #[tauri::command]
-async fn select_tmdb_candidate(job_id: String, media_type: String, tmdb_id: i64, slot_index: Option<i64>) -> Result<(), String> {
+async fn select_tmdb_candidate(
+    job_id: String,
+    media_type: String,
+    tmdb_id: i64,
+    slot_index: Option<i64>,
+    rip_title_id: Option<i64>,
+) -> Result<(), String> {
     let resume_job_id = job_id.clone();
     let mut args = vec![
         "tmdb".to_string(),
@@ -384,6 +390,10 @@ async fn select_tmdb_candidate(job_id: String, media_type: String, tmdb_id: i64,
     if let Some(slot_index) = slot_index {
         args.push("--slot-index".to_string());
         args.push(slot_index.to_string());
+    }
+    if let Some(rip_title_id) = rip_title_id {
+        args.push("--rip-title-id".to_string());
+        args.push(rip_title_id.to_string());
     }
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let _ = run_python_text(&refs)?;

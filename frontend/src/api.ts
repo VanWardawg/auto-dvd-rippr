@@ -91,8 +91,9 @@ export async function selectMovieSlotCandidate(
   jobId: string,
   slotIndex: number,
   tmdbId: number,
+  ripTitleId: number | null,
 ): Promise<void> {
-  return invoke("select_tmdb_candidate", { jobId, mediaType: "movie", tmdbId, slotIndex });
+  return invoke("select_tmdb_candidate", { jobId, mediaType: "movie", tmdbId, slotIndex, ripTitleId });
 }
 
 export async function overrideMapping(

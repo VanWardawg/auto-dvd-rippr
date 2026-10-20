@@ -11,6 +11,7 @@ import type {
   JobLog,
   JobSnapshot,
   JobStatus,
+  MovieSlotSource,
   RipTitle,
   SeasonEpisodeOption,
   SelectedMedia,
@@ -248,6 +249,37 @@ export function movieSlotCount(movieMode?: "single" | "double_feature" | "trilog
   if (movieMode === "double_feature") return 2;
   if (movieMode === "trilogy") return 3;
   return 1;
+}
+
+/** "C1_t02.mkv • 75.2 min • 11 chapters" -- enough to tell two features apart. */
+export function movieSourceLabel(ripTitle: RipTitle) {
+  const parts = [fileNameFromPath(ripTitle.source_file)];
+  if (ripTitle.duration_seconds) parts.push(`${(ripTitle.duration_seconds / 60).toFixed(1)} min`);
+  if (ripTitle.chapter_count != null) parts.push(`${ripTitle.chapter_count} chapters`);
+  return parts.join(" • ");
+}
+
+/** The rip title a movie slot will be named from, or null when none can be. */
+export function movieSlotSourceId(sources: MovieSlotSource[] | undefined, slotIndex: number): number | null {
+  return sources?.find((source) => source.slot_index === slotIndex)?.rip_title_id ?? null;
+}
+
+/**
+ * For the rip-titles table: which movie each file will become. Files are
+ * listed in rip order, which is not slot order, so without this the table
+ * invited reading the first row as slot 1 -- and a double feature reached the
+ * NAS with the two movies under each other's names.
+ */
+export function movieForRipTitle(
+  ripTitleId: number,
+  sources: MovieSlotSource[] | undefined,
+  selected: SelectedMovieSlot[],
+): string | null {
+  const source = sources?.find((entry) => entry.rip_title_id === ripTitleId);
+  if (!source) return null;
+  const movie = selected.find((slot) => slot.slot_index === source.slot_index);
+  if (!movie) return `Slot ${source.slot_index}`;
+  return `Slot ${source.slot_index}: ${movie.title}${movie.year ? ` (${movie.year})` : ""}`;
 }
 
 export function formatRelativeTime(value?: string | null) {

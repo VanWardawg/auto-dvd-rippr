@@ -343,8 +343,40 @@ def _pick_movie_source_by_rip_title(conn, rip_title_id: int) -> Path | None:
     return path if path.exists() else None
 
 
-def _assign_movie_slots(conn, job_id: str, slots) -> list[dict[str, Any]]:
-    rip_rows = conn.execute(
+def plan_movie_slot_sources(
+    rip_rows,
+    slot_indices: list[int],
+    chosen: dict[int, int | None],
+) -> dict[int, int]:
+    """Decide which rip title becomes each movie slot of a multi-movie disc.
+
+    `rip_rows` must be ordered by MakeMKV title number. A slot keeps the rip
+    title the user chose for it; every other slot takes the next feature title
+    in disc order that no slot has claimed. Claimed titles are skipped so two
+    slots can never share a file -- a plain positional zip handed slot 1's
+    explicit choice to slot 2 as well whenever slot 1 picked the second title.
+    Slots that cannot be filled are left out of the result.
+    """
+    valid_ids = {int(row["id"]) for row in rip_rows}
+    main_rows = select_likely_movie_feature_rows(rip_rows)
+    source_rows = main_rows if len(main_rows) >= len(slot_indices) else list(rip_rows)
+
+    plan: dict[int, int] = {}
+    for slot_index in slot_indices:
+        explicit = chosen.get(slot_index)
+        if explicit is not None and int(explicit) in valid_ids and int(explicit) not in plan.values():
+            plan[slot_index] = int(explicit)
+    for slot_index in slot_indices:
+        if slot_index in plan:
+            continue
+        free = next((int(row["id"]) for row in source_rows if int(row["id"]) not in plan.values()), None)
+        if free is not None:
+            plan[slot_index] = free
+    return plan
+
+
+def fetch_movie_rip_rows(conn, job_id: str) -> list[Any]:
+    return conn.execute(
         """
         SELECT id, title_id, duration_seconds
         FROM rip_titles
@@ -353,17 +385,25 @@ def _assign_movie_slots(conn, job_id: str, slots) -> list[dict[str, Any]]:
         """,
         (job_id,),
     ).fetchall()
+
+
+def _assign_movie_slots(conn, job_id: str, slots) -> list[dict[str, Any]]:
+    rip_rows = fetch_movie_rip_rows(conn, job_id)
     if not rip_rows:
         raise NamingError("No rip titles found for movie-pack finalization.")
 
-    main_rows = select_likely_movie_feature_rows(rip_rows)
-    source_rows = main_rows if len(main_rows) >= len(slots) else rip_rows
-    if len(source_rows) < len(slots):
+    slot_indices = [int(slot["slot_index"]) for slot in slots]
+    plan = plan_movie_slot_sources(
+        rip_rows,
+        slot_indices,
+        {int(slot["slot_index"]): slot["rip_title_id"] for slot in slots},
+    )
+    if len(plan) < len(slot_indices):
         raise NamingError("Not enough rip titles found to assign selected movie slots.")
 
     assigned: list[dict[str, Any]] = []
-    for slot, rip_row in zip(slots, source_rows, strict=False):
-        rip_title_id = int(slot["rip_title_id"]) if slot["rip_title_id"] is not None else int(rip_row["id"])
+    for slot in slots:
+        rip_title_id = plan[int(slot["slot_index"])]
         conn.execute(
             """
             UPDATE job_selected_movies

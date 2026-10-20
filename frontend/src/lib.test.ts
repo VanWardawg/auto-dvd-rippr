@@ -32,7 +32,10 @@ import {
   getPipelineStages,
   getProgressPercent,
   isLogWarning,
+  movieForRipTitle,
   movieSlotCount,
+  movieSlotSourceId,
+  movieSourceLabel,
   normalizeStartRequest,
   parseTitles,
   showQueryFromLabel,
@@ -40,7 +43,37 @@ import {
   seasonFromLabel,
   discNumberFromLabel,
 } from "./lib";
-import type { EpisodeMapping, JobLog, StartJobRequest } from "./types";
+import type { EpisodeMapping, JobLog, MovieSlotSource, SelectedMovieSlot, StartJobRequest } from "./types";
+
+describe("double-feature source files", () => {
+  // The disc that went wrong: rip order (row ids) is not slot order.
+  const sources: MovieSlotSource[] = [
+    { slot_index: 1, rip_title_id: 2 },
+    { slot_index: 2, rip_title_id: 1 },
+  ];
+  const selected: SelectedMovieSlot[] = [
+    { slot_index: 1, tmdb_id: 21956, title: "Scooby-Doo! and the Monster of Mexico", year: 2003 },
+  ];
+
+  it("labels a file by name, length and chapters", () => {
+    expect(
+      movieSourceLabel({ id: 1, source_file: "C:\\rip\\C1_t02.mkv", duration_seconds: 4512, chapter_count: 11 }),
+    ).toBe("C1_t02.mkv • 75.2 min • 11 chapters");
+    expect(movieSourceLabel({ id: 1, source_file: "D1_t00.mkv" })).toBe("D1_t00.mkv");
+  });
+
+  it("finds the file planned for a slot", () => {
+    expect(movieSlotSourceId(sources, 1)).toBe(2);
+    expect(movieSlotSourceId(sources, 3)).toBeNull();
+    expect(movieSlotSourceId(undefined, 1)).toBeNull();
+  });
+
+  it("names the movie each file becomes, by slot rather than table position", () => {
+    expect(movieForRipTitle(2, sources, selected)).toBe("Slot 1: Scooby-Doo! and the Monster of Mexico (2003)");
+    expect(movieForRipTitle(1, sources, selected)).toBe("Slot 2");
+    expect(movieForRipTitle(9, sources, selected)).toBeNull();
+  });
+});
 
 describe("formatBytes", () => {
   it("uses GB above a gigabyte", () => {

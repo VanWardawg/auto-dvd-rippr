@@ -44,7 +44,13 @@ from autorippr.mapper import (
     set_mapping_source_override,
 )
 from autorippr.splitter import SplitError, execute_splits, plan_splits_for_job, set_manual_split_timestamps
-from autorippr.naming import NamingError, finalize_job_outputs, select_likely_movie_feature_rows
+from autorippr.naming import (
+    NamingError,
+    fetch_movie_rip_rows,
+    finalize_job_outputs,
+    plan_movie_slot_sources,
+    select_likely_movie_feature_rows,
+)
 from autorippr.transfer import TransferError, transfer_job_outputs
 from autorippr.pipeline import resume_incomplete_jobs, run_pipeline_for_job
 from autorippr.progress import get_progress
@@ -384,6 +390,28 @@ def _episode_pools_for_snapshot(
     return season_episodes, all_season_episodes
 
 
+def _movie_slot_sources(conn, job: dict[str, Any], selected_movies) -> list[dict[str, int]]:
+    """Which rip title each movie slot will be named from, chosen or not.
+
+    Finalization assigns files with the same planner, so this is exactly what
+    will be written -- the UI shows it next to each slot instead of leaving the
+    user to guess from the rip-titles table, whose order is not slot order.
+    """
+    movie_mode = str(job.get("movie_mode") or "single")
+    if str(job.get("media_type") or "") != "movie" or movie_mode == "single":
+        return []
+    required = 3 if movie_mode == "trilogy" else 2
+    plan = plan_movie_slot_sources(
+        fetch_movie_rip_rows(conn, str(job["id"])),
+        list(range(1, required + 1)),
+        {int(r["slot_index"]): r["rip_title_id"] for r in selected_movies},
+    )
+    return [
+        {"slot_index": slot_index, "rip_title_id": rip_title_id}
+        for slot_index, rip_title_id in sorted(plan.items())
+    ]
+
+
 def _build_review_state(
     *,
     cfg,
@@ -685,6 +713,12 @@ def build_parser() -> argparse.ArgumentParser:
     tmdb_select.add_argument("media_type", choices=["tv", "movie"])
     tmdb_select.add_argument("tmdb_id", type=int)
     tmdb_select.add_argument("--slot-index", type=int, default=None)
+    tmdb_select.add_argument(
+        "--rip-title-id",
+        type=int,
+        default=None,
+        help="Rip title (rip_titles.id) to name this movie slot from",
+    )
     tmdb_select.set_defaults(_cmd="tmdb_select")
 
     mapping = sub.add_parser("mapping", help="Episode mapping commands")
@@ -944,6 +978,7 @@ def main() -> int:
                         "logs": logs,
                         "selected_media": dict(selected_media) if selected_media else None,
                         "selected_movies": [dict(r) for r in selected_movies],
+                        "movie_slot_sources": _movie_slot_sources(conn, job, selected_movies),
                         "season_episodes": season_episodes,
                         "all_season_episodes": all_season_episodes,
                         "tmdb_candidates": [dict(r) for r in tmdb_rows],
@@ -1121,7 +1156,9 @@ def main() -> int:
 
         if args.tmdb_command == "select":
             try:
-                selected = select_tmdb_candidate(conn, args.job_id, args.tmdb_id, args.media_type, args.slot_index)
+                selected = select_tmdb_candidate(
+                    conn, args.job_id, args.tmdb_id, args.media_type, args.slot_index, args.rip_title_id
+                )
             except TmdbError as exc:
                 print(f"TMDB error: {exc}", file=sys.stderr)
                 return 6

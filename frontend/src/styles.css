@@ -1680,6 +1680,18 @@ input::placeholder {
   min-width: 0;
 }
 
+/* A select with a button beside it, e.g. a movie slot's source file + Play. */
+.inline-field {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.inline-field select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .show-lookup-query input {
   flex: 1 1 auto;
   min-width: 0;

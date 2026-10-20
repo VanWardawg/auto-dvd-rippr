@@ -70,7 +70,10 @@ import {
   getProgressPercent,
   isLogWarning,
   mappingDisplay,
+  movieForRipTitle,
   movieSlotCount,
+  movieSlotSourceId,
+  movieSourceLabel,
   normalizeStartRequest,
   parseScoreBreakdown,
   parseTitles,
@@ -1186,6 +1189,8 @@ export default function App() {
       const takenSlots = new Set(selectedMovies.map((slot) => slot.slot_index));
       const nextSlot = Array.from({ length: requiredMovieSlots }, (_, index) => index + 1).find((slot) => !takenSlots.has(slot)) ?? 1;
       initial.slotIndex = String(nextSlot);
+      const plannedSource = movieSlotSourceId(snapshot?.movie_slot_sources, nextSlot);
+      initial.ripTitleId = plannedSource != null ? String(plannedSource) : "";
     }
     setModal("tmdb");
     setModalJobId(selectedJobId);
@@ -1225,6 +1230,7 @@ export default function App() {
             jobId,
             Number(modalValues.slotIndex),
             Number(modalValues.tmdbId),
+            modalValues.ripTitleId ? Number(modalValues.ripTitleId) : null,
           );
         } else {
           await selectTmdbCandidate(
@@ -2482,6 +2488,13 @@ export default function App() {
                         <div>
                           <strong>{`Slot ${slot.slot_index}`}</strong>
                           <p>{slot.title}{slot.year ? ` (${slot.year})` : ""}</p>
+                          <p>
+                            {(() => {
+                              const sourceId = movieSlotSourceId(snapshot.movie_slot_sources, slot.slot_index);
+                              const source = ripTitleOptions.find((r) => r.id === sourceId);
+                              return source ? `From ${movieSourceLabel(source)}` : "No source file assigned";
+                            })()}
+                          </p>
                         </div>
                       </div>
                     ))}
@@ -2518,6 +2531,7 @@ export default function App() {
                       <th>Source</th>
                       <th>Duration</th>
                       <th>Chapters</th>
+                      {isMultiMovie ? <th>Becomes</th> : null}
                       <th>Action</th>
                     </tr>
                   </thead>
@@ -2527,6 +2541,9 @@ export default function App() {
                         <td>{fileNameFromPath(ripTitle.source_file)}</td>
                         <td>{ripTitle.duration_seconds ? `${(ripTitle.duration_seconds / 60).toFixed(1)}m` : "—"}</td>
                         <td>{ripTitle.chapter_count ?? "—"}</td>
+                        {isMultiMovie ? (
+                          <td>{movieForRipTitle(ripTitle.id, snapshot.movie_slot_sources, selectedMovies) ?? "Not used"}</td>
+                        ) : null}
                         <td>
                           <button onClick={() => void openPath(ripTitle.source_file)}>
                             Play
@@ -2706,7 +2723,14 @@ export default function App() {
                       <span>Movie slot</span>
                       <select
                         value={modalValues.slotIndex ?? "1"}
-                        onChange={(e) => setModalValues((v) => ({ ...v, slotIndex: e.target.value }))}
+                        onChange={(e) => {
+                          const planned = movieSlotSourceId(snapshot?.movie_slot_sources, Number(e.target.value));
+                          setModalValues((v) => ({
+                            ...v,
+                            slotIndex: e.target.value,
+                            ripTitleId: planned != null ? String(planned) : "",
+                          }));
+                        }}
                       >
                         {Array.from({ length: requiredMovieSlots }, (_, index) => index + 1).map((slot) => (
                           <option key={slot} value={slot}>
@@ -2714,6 +2738,35 @@ export default function App() {
                           </option>
                         ))}
                       </select>
+                    </label>
+                  ) : null}
+                  {isMultiMovie ? (
+                    <label>
+                      <span>Source file for this movie</span>
+                      <div className="inline-field">
+                        <select
+                          value={modalValues.ripTitleId ?? ""}
+                          onChange={(e) => setModalValues((v) => ({ ...v, ripTitleId: e.target.value }))}
+                          disabled={ripTitleOptions.length === 0}
+                        >
+                          {ripTitleOptions.length === 0 ? <option value="">No rip titles yet</option> : null}
+                          {ripTitleOptions.map((ripTitle) => (
+                            <option key={ripTitle.id} value={ripTitle.id}>
+                              {movieSourceLabel(ripTitle)}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          disabled={!modalValues.ripTitleId}
+                          onClick={() => {
+                            const chosen = ripTitleOptions.find((r) => String(r.id) === modalValues.ripTitleId);
+                            if (chosen) void openPath(chosen.source_file);
+                          }}
+                        >
+                          Play
+                        </button>
+                      </div>
                     </label>
                   ) : null}
                   <label>

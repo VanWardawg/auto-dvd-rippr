@@ -232,7 +232,14 @@ def search_job_with_tmdb_query(conn, cfg: AppConfig, job_id: str, query: str) ->
     }
 
 
-def select_tmdb_candidate(conn, job_id: str, tmdb_id: int, media_type: str, slot_index: int | None = None) -> dict[str, Any]:
+def select_tmdb_candidate(
+    conn,
+    job_id: str,
+    tmdb_id: int,
+    media_type: str,
+    slot_index: int | None = None,
+    rip_title_id: int | None = None,
+) -> dict[str, Any]:
     row = conn.execute(
         """
         SELECT id, job_id, tmdb_id, media_type, title, year, score
@@ -258,6 +265,8 @@ def select_tmdb_candidate(conn, job_id: str, tmdb_id: int, media_type: str, slot
         required_slots = _required_movie_slots(movie_mode)
         if slot_index is None or slot_index < 1 or slot_index > required_slots:
             raise TmdbError(f"Movie slot index must be between 1 and {required_slots}.")
+        if rip_title_id is not None:
+            _claim_rip_title_for_slot(conn, job_id, slot_index, rip_title_id)
         _upsert_selected_movie_slot(
             conn=conn,
             job_id=job_id,
@@ -265,12 +274,14 @@ def select_tmdb_candidate(conn, job_id: str, tmdb_id: int, media_type: str, slot
             tmdb_id=int(row["tmdb_id"]),
             title=str(row["title"]),
             year=row["year"],
+            rip_title_id=rip_title_id,
         )
+        source_note = f" from rip title {rip_title_id}" if rip_title_id is not None else ""
         append_job_log(
             conn,
             job_id,
             "INFO",
-            f"Manual movie slot selection applied: slot={slot_index} movie {tmdb_id}",
+            f"Manual movie slot selection applied: slot={slot_index} movie {tmdb_id}{source_note}",
             None,
             None,
         )
@@ -1529,21 +1540,52 @@ def _upsert_selected_movie_slot(
     tmdb_id: int,
     title: str,
     year: int | None,
+    rip_title_id: int | None = None,
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
+    # A selection without a source keeps whatever file the slot already had.
     conn.execute(
         """
         INSERT INTO job_selected_movies (
             job_id, slot_index, tmdb_id, title, year, rip_title_id, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(job_id, slot_index) DO UPDATE SET
             tmdb_id = excluded.tmdb_id,
             title = excluded.title,
             year = excluded.year,
+            rip_title_id = COALESCE(excluded.rip_title_id, job_selected_movies.rip_title_id),
             updated_at = excluded.updated_at
         """,
-        (job_id, slot_index, tmdb_id, title, year, now, now),
+        (job_id, slot_index, tmdb_id, title, year, rip_title_id, now, now),
+    )
+
+
+def _claim_rip_title_for_slot(conn, job_id: str, slot_index: int, rip_title_id: int) -> None:
+    """Validate a chosen source file and take it away from any other slot.
+
+    Another slot holding the same file gets this slot's previous file, so
+    choosing "the other one" for slot 1 swaps the pair rather than leaving
+    both slots on one file.
+    """
+    owned = conn.execute(
+        "SELECT 1 FROM rip_titles WHERE id = ? AND job_id = ?",
+        (rip_title_id, job_id),
+    ).fetchone()
+    if not owned:
+        raise TmdbError(f"Rip title {rip_title_id} does not belong to job {job_id}.")
+    previous = conn.execute(
+        "SELECT rip_title_id FROM job_selected_movies WHERE job_id = ? AND slot_index = ?",
+        (job_id, slot_index),
+    ).fetchone()
+    previous_id = previous["rip_title_id"] if previous else None
+    conn.execute(
+        """
+        UPDATE job_selected_movies
+        SET rip_title_id = ?, updated_at = ?
+        WHERE job_id = ? AND slot_index != ? AND rip_title_id = ?
+        """,
+        (previous_id, datetime.now(timezone.utc).isoformat(), job_id, slot_index, rip_title_id),
     )
 
 
