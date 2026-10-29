@@ -340,6 +340,15 @@ def execute_rip_job(
         mock=mock,
         disc_info_by_title=disc_info_by_title,
     )
+    if not mock:
+        mismatches = _titles_not_matching_the_scan(titles, disc_info_by_title)
+        if mismatches:
+            raise RipError(
+                "MakeMKV saved a different title than the disc scan found, so the rip was not used: "
+                + "; ".join(mismatches)
+                + ". This usually means the drive hit read errors and MakeMKV renumbered the titles. "
+                "Clean the disc and rip it again."
+            )
     _persist_rip_titles(conn, job_id, titles)
     conn.commit()
 
@@ -464,6 +473,18 @@ def recover_completed_rip(conn, cfg: AppConfig, job_id: str) -> dict[str, Any] |
     # the crash. Refusing to recover that means re-ripping a disc whose rip is
     # already sitting on disk, finished.
     if not makemkv_said_done and not _durations_match_the_disc(titles, disc_info_by_title):
+        return None
+    mismatches = _titles_not_matching_the_scan(titles, disc_info_by_title)
+    if mismatches:
+        append_job_log(
+            conn=conn,
+            job_id=job_id,
+            level="WARNING",
+            message="Not recovering the existing rip: " + "; ".join(mismatches) + ". The disc will be re-ripped.",
+            from_status=None,
+            to_status=None,
+        )
+        conn.commit()
         return None
 
     _persist_rip_titles(conn, job_id, titles)
@@ -1427,6 +1448,46 @@ def _run_mock_rip(rip_output_dir: Path) -> list[Path]:
         path.write_bytes(b"mock-mkv-placeholder")
         mock_files.append(path)
     return mock_files
+
+
+# How far a ripped file's length may stray from the length the disc scan gave
+# that title number. ffprobe and MakeMKV round differently, so a few seconds
+# is noise; minutes are not.
+SCAN_DURATION_TOLERANCE = 0.05
+SCAN_DURATION_MIN_SLACK_SECONDS = 10.0
+
+
+def _titles_not_matching_the_scan(titles, disc_info_by_title: dict[int, dict[str, Any]]) -> list[str]:
+    """
+    Ripped files whose length differs from what the scan said that title was.
+
+    MakeMKV enumerates the disc again when it rips, and names output by its own
+    numbering at that moment. When read errors hide a title the second time,
+    every number after it shifts: on a single-episode disc, title 0 was the
+    24-minute episode in the scan and a 3-minute extra in the rip, and MakeMKV
+    still reported success. Comparing per title number -- not against any
+    length on the disc, as _durations_match_the_disc does -- is what catches
+    a file that is a real title, just the wrong one.
+    """
+    if not disc_info_by_title:
+        return []
+    expected = {c.title_id: c.duration_seconds for c in build_title_candidates(disc_info_by_title)}
+    problems: list[str] = []
+    for title in titles:
+        want = expected.get(int(title.title_id))
+        actual = float(getattr(title, "duration_seconds", 0) or 0)
+        if not want or want <= 0 or actual <= 0:
+            continue
+        if abs(actual - want) > max(SCAN_DURATION_MIN_SLACK_SECONDS, want * SCAN_DURATION_TOLERANCE):
+            problems.append(
+                f"title {title.title_id} should be {_format_length(want)} but the file is {_format_length(actual)}"
+            )
+    return problems
+
+
+def _format_length(seconds: float) -> str:
+    total = int(round(seconds))
+    return f"{total // 60}:{total % 60:02d}"
 
 
 def _build_title_metadata(

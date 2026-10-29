@@ -6,6 +6,7 @@ from typing import Any
 from .config import AppConfig
 from .mapper import MappingError, analyze_dvd_menu, map_job_episodes
 from .job_ops import purge_local_files
+from .joblock import JobAlreadyRunningError, job_run_lock
 from .logger import get_logger
 from .naming import NamingError, finalize_job_outputs
 from .rip import RipError, eject_drive, execute_rip_job, recover_completed_rip
@@ -250,6 +251,26 @@ def _infer_resume_stage(conn, job) -> str:
 
 
 def run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = False) -> dict[str, Any]:
+    try:
+        with job_run_lock(cfg.staging_root, job_id):
+            return _run_pipeline_for_job(conn, cfg, job_id, mock_rip=mock_rip)
+    except JobAlreadyRunningError:
+        # Not an error for the job: the run that holds the lock is doing the
+        # work. Recording it explains why Resume appeared to do nothing.
+        append_job_log(
+            conn=conn,
+            job_id=job_id,
+            level="WARNING",
+            message="Resume ignored: this job's pipeline is still running.",
+            from_status=None,
+            to_status=None,
+        )
+        conn.commit()
+        job = get_job(conn, job_id)
+        return {"status": str(job["status"]) if job else "unknown", "already_running": True}
+
+
+def _run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = False) -> dict[str, Any]:
     job = get_job(conn, job_id)
     if not job:
         raise RuntimeError(f"Job not found: {job_id}")

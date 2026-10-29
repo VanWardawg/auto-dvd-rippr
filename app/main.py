@@ -123,6 +123,10 @@ STALL_WARN_SECONDS = 60.0
 # been touched in three minutes means the process writing it is gone -- not
 # that the disc is slow.
 ABANDONED_RIP_SECONDS = 180.0
+# Before MakeMKV starts saving it analyses the disc ("Processing title sets"),
+# and on a slow drive that phase sat still for minutes on a healthy rip -- long
+# enough for the one-minute warning to fire and invite a Resume.
+STALL_WARN_BEFORE_SAVING_SECONDS = 300.0
 
 
 def _seconds_since_heartbeat(progress_row: dict[str, Any] | None) -> float | None:
@@ -140,6 +144,14 @@ def _seconds_since_heartbeat(progress_row: dict[str, Any] | None) -> float | Non
     if updated is None:
         return None
     return max(0.0, (datetime.now(timezone.utc) - updated).total_seconds())
+
+
+def _stall_warn_seconds(progress_row: dict[str, Any] | None) -> float:
+    """How long progress may sit still before it counts as stalled."""
+    detail = str((progress_row or {}).get("detail") or "")
+    if detail and not detail.startswith("Saving"):
+        return STALL_WARN_BEFORE_SAVING_SECONDS
+    return STALL_WARN_SECONDS
 
 
 def _seconds_since_last_advance(progress_row: dict[str, Any] | None) -> float | None:
@@ -501,8 +513,15 @@ def _build_review_state(
         rip_details.append("Remove stale rip_output files or auto-clear them before retrying.")
     if "MEDIUM ERROR" in makemkv_log or "UNCORRECTABLE ERROR" in makemkv_log:
         rip_needed = True
-        rip_reason = "MakeMKV reported a disc read error during rip."
-        rip_details.append("MakeMKV log contains MEDIUM ERROR / UNCORRECTABLE ERROR.")
+        if str(job.get("status")) == "ripping":
+            rip_reason = "MakeMKV hit disc read errors and is retrying."
+            rip_details.append(
+                "The rip is still running; let it finish. If the saved file does not match "
+                "the disc, the job stops instead of copying it."
+            )
+        else:
+            rip_reason = "MakeMKV reported a disc read error during rip."
+            rip_details.append("MakeMKV log contains MEDIUM ERROR / UNCORRECTABLE ERROR.")
     if str(job.get("media_type") or "tv") == "movie" and rip_title_rows:
         main_rows = select_likely_movie_feature_rows(rip_title_rows)
         if not main_rows and len(rip_title_rows) > 1:
@@ -530,9 +549,9 @@ def _build_review_state(
                 f"No progress heartbeat for {int(abandoned_seconds)}s, "
                 "and the rip writes one every second."
             )
-        elif stall_seconds is not None and stall_seconds >= STALL_WARN_SECONDS:
+        elif stall_seconds is not None and stall_seconds >= _stall_warn_seconds(progress_row):
             rip_needed = True
-            rip_reason = "Rip appears stalled: MakeMKV has not made progress for about a minute."
+            rip_reason = "Rip appears stalled: MakeMKV has not made progress for a while."
             rip_details.append(
                 f"MakeMKV progress has not advanced for {int(stall_seconds)}s."
             )
