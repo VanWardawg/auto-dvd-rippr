@@ -128,6 +128,7 @@ fn main() {
             search_tmdb_candidates,
             search_tv_shows,
             get_tv_show_seasons,
+            get_season_episodes,
             select_tmdb_candidate,
             override_mapping,
             override_mapping_source,
@@ -369,6 +370,13 @@ async fn get_tv_show_seasons(
     }
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     run_python_json(&refs)
+}
+
+#[tauri::command]
+async fn get_season_episodes(tmdb_id: i64, season_number: i64) -> Result<Value, String> {
+    let id = tmdb_id.to_string();
+    let season = season_number.to_string();
+    run_python_json(&["tmdb", "season-episodes", &id, &season])
 }
 
 #[tauri::command]

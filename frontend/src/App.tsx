@@ -21,6 +21,7 @@ import {
   rebuildOutput,
   searchTmdbCandidates,
   searchTvShows,
+  getSeasonEpisodes,
   getTvShowSeasons,
   selectMovieSlotCandidate,
   selectTmdbCandidate,
@@ -49,6 +50,7 @@ import {
   TV_PIPELINE_STAGES,
   buildConfigDraft,
   buildEpisodeChoices,
+  clearPickedEpisode,
   buildGuidedReviewRows,
   filterEpisodeChoices,
   findDuplicateAssignments,
@@ -78,10 +80,11 @@ import {
   parseScoreBreakdown,
   parseTitles,
   ripTitleDisplay,
+  startBlockedReason,
   tmdbCandidateDisplay,
 } from "./lib";
 import type { DriveCardState, EpisodeChoice, GuidedReviewRowDraft, GuidedSplitDraft } from "./lib";
-import type { TvShowDetail, TvShowResult } from "./types";
+import type { DiscScope, SeasonEpisodeOption, TvShowDetail, TvShowResult } from "./types";
 import type { DiscDrive, EpisodeMapping, JobLog, JobSnapshot, JobStatus, JobSummary, RipTitle, RuntimeConfigState, SelectedMovieSlot, SplitPlan, StartJobRequest, TmdbCandidate } from "./types";
 
 const POLL_MS = 3000;
@@ -214,6 +217,9 @@ type ShowLookupState = {
   detail: TvShowDetail | null;
   discNumber: number | null;
   discsInSet: number | null;
+  // The chosen season's episodes, for the single-episode picker, tagged with
+  // the show and season they belong to so a change of either reloads them.
+  episodes: { key: string; list: SeasonEpisodeOption[] } | null;
   busy: boolean;
   error: string | null;
 };
@@ -225,6 +231,7 @@ function emptyLookup(query: string): ShowLookupState {
     detail: null,
     discNumber: null,
     discsInSet: null,
+    episodes: null,
     busy: false,
     error: null,
   };
@@ -308,22 +315,55 @@ export default function App() {
     // What the user typed wins over what the label happened to say.
     const discNumber = lookupState.discNumber ?? discNumberFromLabel(card.form.discLabel);
     const range = season ? suggestEpisodeRange(season.episode_count, discNumber, discsInSet) : null;
-    updateDriveCard(card.id, (value) => ({
-      ...value,
-      form: {
-        ...value.form,
-        seasonNumber,
-        // Only narrow the scope when there is a real range to narrow it to.
-        discScope: range ? "partial_season" : value.form.discScope,
-        episodeRangeStart: range ? range.start : value.form.episodeRangeStart,
-        episodeRangeEnd: range ? range.end : value.form.episodeRangeEnd,
-      },
-    }));
+    updateDriveCard(card.id, (value) => {
+      // A single-episode card keeps its scope; a new season voids its pick.
+      if (value.form.discScope === "single_episode") {
+        return {
+          ...value,
+          form: { ...value.form, seasonNumber, episodeRangeStart: null, episodeRangeEnd: null },
+        };
+      }
+      return {
+        ...value,
+        form: {
+          ...value.form,
+          seasonNumber,
+          // Only narrow the scope when there is a real range to narrow it to.
+          discScope: range ? "partial_season" : value.form.discScope,
+          episodeRangeStart: range ? range.start : value.form.episodeRangeStart,
+          episodeRangeEnd: range ? range.end : value.form.episodeRangeEnd,
+        },
+      };
+    });
   };
 
   const [driveCards, setDriveCards] = useState<DriveCardState[]>(() =>
     deserializeDriveCards(window.localStorage.getItem(DRIVE_CARDS_STORAGE_KEY)),
   );
+  // A single-episode card needs its season's episode list for the picker,
+  // however the show or season got set -- the lookup panel or the plain
+  // season box. Fetched once per show+season; TMDB responses are cached.
+  const episodeLoadsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const card of driveCards) {
+      const { mediaType, discScope, tmdbShowId, seasonNumber } = card.form;
+      if (mediaType !== "tv" || discScope !== "single_episode" || tmdbShowId == null || seasonNumber == null) continue;
+      const key = `${tmdbShowId}:${seasonNumber}`;
+      if (showLookups[card.id]?.episodes?.key === key) continue;
+      const loadKey = `${card.id}|${key}`;
+      if (episodeLoadsRef.current.has(loadKey)) continue;
+      episodeLoadsRef.current.add(loadKey);
+      getSeasonEpisodes(tmdbShowId, seasonNumber)
+        .then((list) => {
+          episodeLoadsRef.current.delete(loadKey);
+          patchLookup(card.id, { episodes: { key, list } });
+        })
+        // A failed load stays marked, so the error shows instead of a retry
+        // on every render; choosing another season tries again.
+        .catch((error) => patchLookup(card.id, { error: String(error) }));
+    }
+  }, [driveCards, showLookups]);
+
   const [modal, setModal] = useState<null | "tmdb" | "map" | "file" | "split" | "review">(null);
   const [modalJobId, setModalJobId] = useState<string | null>(null);
   const [modalValues, setModalValues] = useState<Record<string, string>>({});
@@ -643,6 +683,19 @@ export default function App() {
             continue;
           }
 
+          const blocked = startBlockedReason(card.form);
+          if (blocked) {
+            // Not marked as auto-started: the next poll starts it once picked.
+            setDriveCards((cards) =>
+              cards.map((entry) =>
+                entry.id === card.id
+                  ? { ...entry, continuousStatus: `Disc detected: ${disc.volume_label} — ${blocked}` }
+                  : entry,
+              ),
+            );
+            continue;
+          }
+
           setDriveCards((cards) =>
             cards.map((entry) =>
               entry.id === card.id ? { ...entry, continuousStatus: `Auto-starting: ${disc.volume_label}` } : entry,
@@ -662,7 +715,9 @@ export default function App() {
           await refreshSnapshot(jobId);
           setDriveCards((cards) =>
             cards.map((entry) =>
-              entry.id === card.id ? { ...entry, continuousStatus: `Started: ${disc.volume_label}` } : entry,
+              entry.id === card.id
+                ? { ...entry, form: clearPickedEpisode(entry.form), continuousStatus: `Started: ${disc.volume_label}` }
+                : entry,
             ),
           );
           autoStartInFlightRef.current[card.id] = null;
@@ -1441,6 +1496,8 @@ export default function App() {
               const isCompilation = card.form.discScope === "compilation";
               const showSeasonNumber = card.form.mediaType === "tv" && !isCompilation;
               const showEpisodeRange = card.form.mediaType === "tv" && card.form.discScope === "partial_season";
+              const isSingleEpisode = card.form.mediaType === "tv" && card.form.discScope === "single_episode";
+              const startBlocked = startBlockedReason(card.form);
               const showMovieMode = card.form.mediaType === "movie";
               return (
                 <div key={card.id} className="drive-card">
@@ -1650,6 +1707,31 @@ export default function App() {
                               </label>
                             </div>
                             )}
+                            {isSingleEpisode && card.form.seasonNumber != null ? (
+                              <label className="show-lookup-episode">
+                                <span>Episode on this disc</span>
+                                {lookup.episodes?.key === `${card.form.tmdbShowId}:${card.form.seasonNumber}` ? (
+                                  <EpisodeSearchSelect
+                                    choices={buildEpisodeChoices(lookup.episodes.list)}
+                                    seasonValue={String(card.form.seasonNumber)}
+                                    episodeValue={card.form.episodeRangeStart != null ? String(card.form.episodeRangeStart) : ""}
+                                    disabled={busyAction !== null}
+                                    onSelect={(choice) =>
+                                      updateDriveCard(card.id, (value) => ({
+                                        ...value,
+                                        form: {
+                                          ...value.form,
+                                          episodeRangeStart: choice?.episode ?? null,
+                                          episodeRangeEnd: choice?.episode ?? null,
+                                        },
+                                      }))
+                                    }
+                                  />
+                                ) : (
+                                  <p className="show-lookup-hint">Loading episodes…</p>
+                                )}
+                              </label>
+                            ) : null}
                             {isCompilation ? (
                               <p className="show-lookup-hint">
                                 {(() => {
@@ -1665,7 +1747,7 @@ export default function App() {
                                 })()}
                               </p>
                             ) : null}
-                            {!isCompilation && chosenSeason ? (
+                            {!isCompilation && !isSingleEpisode && chosenSeason ? (
                               <p className="show-lookup-hint">
                                 {chosenSeason.is_specials
                                   ? `${chosenSeason.episode_count} specials. These are a grab-bag rather than a run, so pick the episodes by hand.`
@@ -1690,13 +1772,14 @@ export default function App() {
                               ...value,
                               form: {
                                 ...value.form,
-                                discScope: e.target.value as "full_season" | "partial_season" | "special" | "custom" | "compilation",
+                                discScope: e.target.value as DiscScope,
                               },
                             }))
                           }
                         >
                           <option value="full_season">Full season</option>
                           <option value="partial_season">Partial season</option>
+                          <option value="single_episode">Single episode (pick it below)</option>
                           <option value="special">Special</option>
                           <option value="compilation">Compilation (episodes from any season)</option>
                           <option value="custom">Custom</option>
@@ -1802,14 +1885,16 @@ export default function App() {
                       </>
                     ) : null}
                   </div>
+                  {startBlocked ? <p className="continuous-status">{startBlocked}</p> : null}
                   <button
                     className="primary-button"
                     aria-label={`Start ripping on drive ${index + 1}`}
-                    disabled={busyAction !== null || !configReady || makemkvBlocking}
+                    disabled={busyAction !== null || !configReady || makemkvBlocking || startBlocked !== null}
                     onClick={() =>
                       void runAction(`Starting pipeline (${card.form.opticalDrive ?? `Drive ${index + 1}`})`, async () => {
                         const latestCard = driveCardsRef.current.find((entry) => entry.id === card.id) ?? card;
                         const jobId = await startPipeline(normalizeStartRequest(latestCard.form));
+                        updateDriveCard(card.id, (value) => ({ ...value, form: clearPickedEpisode(value.form) }));
                         setSelectedJobId(jobId);
                       })
                     }

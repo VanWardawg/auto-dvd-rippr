@@ -355,11 +355,22 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
                 f"No TMDB episodes remain after applying disc range {range_start}-{range_end}."
             )
 
+    single_target = None
+    if disc_scope == "single_episode" and range_start is not None:
+        single_target = next((t for t in targets if t.episode_number == range_start), None)
+        if single_target is None:
+            raise MappingError(
+                f"Episode {range_start} is not in season {season_number} on TMDB."
+            )
+
     _clear_downstream_state_for_remap(conn, cfg, job_id)
-    planned = _plan_mappings(
-        rip_rows, targets, cfg, job_id, _job_disc_drive(conn, job_id),
-        position_is_evidence=disc_scope_early != "compilation",
-    )
+    if single_target is not None:
+        planned = _plan_single_episode(rip_rows, single_target)
+    else:
+        planned = _plan_mappings(
+            rip_rows, targets, cfg, job_id, _job_disc_drive(conn, job_id),
+            position_is_evidence=disc_scope_early != "compilation",
+        )
     verification = _verify_positional_assignments(
         conn, cfg, job_id, planned, rip_rows, verification_targets
     )
@@ -689,6 +700,48 @@ def _take_core_targets(remaining: list[EpisodeTarget], count: int) -> list[Episo
     for target in taken:
         remaining.remove(target)
     return taken
+
+
+def _plan_single_episode(rip_rows, target: EpisodeTarget) -> list[dict[str, Any]]:
+    """Map a one-episode disc: the user named the episode when starting the job.
+
+    Collections like Living Scriptures put one ~30-minute story on each of
+    dozens of discs. Inferring which story from position or duration is a
+    guess every time -- every file is "episode 1" by position and every
+    episode is the same length -- so it paused every disc for review. Here the
+    answer is given up front: the longest title is the episode, and anything
+    else on the disc is an extra.
+    """
+    main = max(rip_rows, key=lambda r: float(r["duration_seconds"] or 0.0), default=None)
+    planned: list[dict[str, Any]] = []
+    for r in rip_rows:
+        if main is not None and int(r["id"]) == int(main["id"]):
+            planned.append(
+                {
+                    "rip_title_id": int(r["id"]),
+                    "episode_start": target.episode_number,
+                    "episode_end": target.episode_number,
+                    "tmdb_episode_ids": [target.tmdb_episode_id],
+                    "episode_titles": [target.title],
+                    "confidence": 0.99,
+                    "reason": "Single-episode disc: episode chosen when the job was started; longest title used.",
+                    "needs_split": False,
+                }
+            )
+        else:
+            planned.append(
+                {
+                    "rip_title_id": int(r["id"]),
+                    "episode_start": None,
+                    "episode_end": None,
+                    "tmdb_episode_ids": [],
+                    "episode_titles": [],
+                    "confidence": 0.96,
+                    "reason": "Single-episode disc: shorter than the main title, treated as an extra.",
+                    "needs_split": False,
+                }
+            )
+    return planned
 
 
 def _plan_mappings(

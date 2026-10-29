@@ -18,6 +18,8 @@ import {
   buildConfigDraft,
   buildEpisodeChoices,
   buildGuidedReviewRows,
+  clearPickedEpisode,
+  startBlockedReason,
   filterEpisodeChoices,
   findDuplicateAssignments,
   splitMappingReason,
@@ -732,5 +734,46 @@ describe("findDuplicateAssignments", () => {
       row("c", "4", "12", "12"),
     ]);
     expect(dups.size).toBe(0);
+  });
+});
+
+describe("single-episode discs", () => {
+  const form: StartJobRequest = {
+    discLabel: " HELAMAN ",
+    opticalDrive: "D:",
+    mediaType: "tv",
+    discScope: "single_episode",
+    tmdbShowId: 67124,
+    seasonNumber: 1,
+    episodeRangeStart: 8,
+    episodeRangeEnd: 3,
+  };
+
+  it("sends the picked episode as a one-episode range", () => {
+    const request = normalizeStartRequest(form);
+    expect(request.discScope).toBe("single_episode");
+    expect(request.tmdbShowId).toBe(67124);
+    expect(request.seasonNumber).toBe(1);
+    expect([request.episodeRangeStart, request.episodeRangeEnd]).toEqual([8, 8]);
+  });
+
+  it("will not start until the show, season and episode are all chosen", () => {
+    expect(startBlockedReason(form)).toBeNull();
+    expect(startBlockedReason({ ...form, tmdbShowId: null })).toMatch(/show/);
+    expect(startBlockedReason({ ...form, seasonNumber: null })).toMatch(/season/);
+    expect(startBlockedReason({ ...form, episodeRangeStart: null })).toMatch(/episode/);
+    // Other scopes and movies are never held back by this rule.
+    expect(startBlockedReason({ ...form, discScope: "full_season", episodeRangeStart: null })).toBeNull();
+    expect(startBlockedReason({ ...form, mediaType: "movie", tmdbShowId: null })).toBeNull();
+  });
+
+  it("clears the pick after starting, so the next disc cannot reuse it", () => {
+    const next = clearPickedEpisode(form);
+    expect([next.episodeRangeStart, next.episodeRangeEnd]).toEqual([null, null]);
+    expect(next.tmdbShowId).toBe(67124);
+    expect(next.seasonNumber).toBe(1);
+    expect(startBlockedReason(next)).toMatch(/episode/);
+    const partial = { ...form, discScope: "partial_season" as const };
+    expect(clearPickedEpisode(partial)).toBe(partial);
   });
 });

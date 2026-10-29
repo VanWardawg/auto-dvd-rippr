@@ -390,6 +390,11 @@ def _episode_pools_for_snapshot(
     return season_episodes, all_season_episodes
 
 
+# "single_episode" is a disc holding exactly one episode the user names when
+# starting the job, so mapping needs no guessing and no review.
+DISC_SCOPES = ["full_season", "partial_season", "single_episode", "special", "custom", "compilation"]
+
+
 def _movie_slot_sources(conn, job: dict[str, Any], selected_movies) -> list[dict[str, int]]:
     """Which rip title each movie slot will be named from, chosen or not.
 
@@ -597,7 +602,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--optical-drive", default=None)
     create.add_argument("--media-type", default="tv", choices=["tv", "movie"])
     create.add_argument("--movie-mode", default="single", choices=["single", "double_feature", "trilogy"])
-    create.add_argument("--disc-scope", default=None, choices=["full_season", "partial_season", "special", "custom", "compilation"])
+    create.add_argument("--disc-scope", default=None, choices=DISC_SCOPES)
     create.add_argument(
         "--tmdb-show-id",
         type=int,
@@ -615,7 +620,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     profile = job_sub.add_parser("set-profile", help="Update disc scope/season/range")
     profile.add_argument("job_id")
-    profile.add_argument("--disc-scope", default=None, choices=["full_season", "partial_season", "special", "custom", "compilation"])
+    profile.add_argument("--disc-scope", default=None, choices=DISC_SCOPES)
     profile.add_argument("--include-specials", dest="include_specials", action="store_true", default=None)
     profile.add_argument("--no-include-specials", dest="include_specials", action="store_false")
     profile.add_argument("--movie-mode", default=None, choices=["single", "double_feature", "trilogy"])
@@ -707,6 +712,13 @@ def build_parser() -> argparse.ArgumentParser:
     tmdb_show_seasons.add_argument("--disc-number", type=int, default=None)
     tmdb_show_seasons.add_argument("--discs-in-set", type=int, default=None)
     tmdb_show_seasons.set_defaults(_cmd="tmdb_show_seasons")
+
+    tmdb_season_episodes = tmdb_sub.add_parser(
+        "season-episodes", help="List one season's episodes, for picking a single-episode disc"
+    )
+    tmdb_season_episodes.add_argument("tmdb_id", type=int)
+    tmdb_season_episodes.add_argument("season_number", type=int)
+    tmdb_season_episodes.set_defaults(_cmd="tmdb_season_episodes")
 
     tmdb_select = tmdb_sub.add_parser("select", help="Manually select TMDB candidate")
     tmdb_select.add_argument("job_id")
@@ -1202,6 +1214,15 @@ def main() -> int:
                     {"start": suggested[0], "end": suggested[1]} if suggested else None
                 )
             print(json.dumps(detail, indent=2))
+            return 0
+
+        if args.tmdb_command == "season-episodes":
+            try:
+                episodes = fetch_tmdb_tv_episodes(conn, cfg, args.tmdb_id, args.season_number)
+            except TmdbError as exc:
+                print(f"TMDB error: {exc}", file=sys.stderr)
+                return 6
+            print(json.dumps({"episodes": episodes}, indent=2))
             return 0
 
         if args.tmdb_command == "identify":

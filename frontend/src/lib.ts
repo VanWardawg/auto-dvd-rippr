@@ -392,6 +392,29 @@ export function getHeroSubtitle(
   return ["queued", "ripping"].includes(snapshot.job.status) ? null : "No selected TMDB media yet";
 }
 
+/**
+ * Why a card cannot start yet, or null when it can. A single-episode disc
+ * without its show or episode would be mapped as a full season instead --
+ * the per-disc review this scope exists to avoid -- so it waits for both.
+ */
+export function startBlockedReason(form: StartJobRequest): string | null {
+  if (form.mediaType !== "tv" || form.discScope !== "single_episode") return null;
+  if (form.tmdbShowId == null) return "Look up and choose the show first.";
+  if (form.seasonNumber == null) return "Choose the season first.";
+  if (form.episodeRangeStart == null) return "Choose which episode is on this disc.";
+  return null;
+}
+
+/**
+ * The card after a single-episode job starts: the episode is cleared so the
+ * next disc cannot silently reuse it -- with ~80 one-story discs, a stale pick
+ * would name every following disc after the same story.
+ */
+export function clearPickedEpisode(form: StartJobRequest): StartJobRequest {
+  if (form.discScope !== "single_episode") return form;
+  return { ...form, episodeRangeStart: null, episodeRangeEnd: null };
+}
+
 export function normalizeStartRequest(form: StartJobRequest): StartJobRequest {
   if (form.mediaType === "movie") {
     return {
@@ -422,6 +445,19 @@ export function normalizeStartRequest(form: StartJobRequest): StartJobRequest {
       seasonNumber: form.seasonNumber ?? null,
       episodeRangeStart: form.episodeRangeStart ?? null,
       episodeRangeEnd: form.episodeRangeEnd ?? null,
+      tmdbShowId: form.tmdbShowId ?? null,
+    };
+  }
+  if (form.discScope === "single_episode") {
+    // The picked episode travels as a one-episode range; start is the pick.
+    return {
+      discLabel: form.discLabel.trim(),
+      opticalDrive: form.opticalDrive ?? null,
+      mediaType: form.mediaType,
+      discScope: form.discScope,
+      seasonNumber: form.seasonNumber ?? null,
+      episodeRangeStart: form.episodeRangeStart ?? null,
+      episodeRangeEnd: form.episodeRangeStart ?? null,
       tmdbShowId: form.tmdbShowId ?? null,
     };
   }

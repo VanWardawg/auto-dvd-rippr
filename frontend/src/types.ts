@@ -9,6 +9,16 @@ export type JobStatus =
   | "done"
   | "error";
 
+// How much of a show a TV disc holds. "single_episode" is one episode the user
+// names when starting the job, so mapping needs no guess and no review.
+export type DiscScope =
+  | "full_season"
+  | "partial_season"
+  | "single_episode"
+  | "special"
+  | "custom"
+  | "compilation";
+
 export interface JobSummary {
   id: string;
   disc_label: string;
@@ -16,7 +26,7 @@ export interface JobSummary {
   media_type: "tv" | "movie";
   movie_mode?: "single" | "double_feature" | "trilogy";
   has_local_artifacts?: boolean;
-  disc_scope?: "full_season" | "partial_season" | "special" | "custom" | "compilation" | null;
+  disc_scope?: DiscScope | null;
   season_number?: number | null;
   episode_range_start?: number | null;
   episode_range_end?: number | null;
@@ -209,7 +219,7 @@ export interface StartJobRequest {
   opticalDrive?: string | null;
   mediaType: "tv" | "movie";
   movieMode?: "single" | "double_feature" | "trilogy";
-  discScope?: "full_season" | "partial_season" | "special" | "custom" | "compilation";
+  discScope?: DiscScope;
   /** Compilation discs only: also match against the show's specials. */
   includeSpecials?: boolean;
   tmdbShowId?: number | null;

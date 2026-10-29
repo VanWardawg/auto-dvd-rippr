@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   DiscDrive,
+  DiscScope,
   JobSnapshot,
   JobSummary,
   RuntimeConfigState,
+  SeasonEpisodeOption,
   StartJobRequest,
   TvShowDetail,
   TvShowResult,
@@ -83,6 +85,12 @@ export async function getTvShowSeasons(
   return invoke("get_tv_show_seasons", { tmdbId, discNumber: discNumber ?? null, discsInSet: discsInSet ?? null });
 }
 
+/** One season's episodes, before any job exists -- for picking a single-episode disc. */
+export async function getSeasonEpisodes(tmdbId: number, seasonNumber: number): Promise<SeasonEpisodeOption[]> {
+  const result = await invoke<{ episodes: SeasonEpisodeOption[] }>("get_season_episodes", { tmdbId, seasonNumber });
+  return result.episodes;
+}
+
 export async function selectTmdbCandidate(jobId: string, mediaType: "tv" | "movie", tmdbId: number): Promise<void> {
   return invoke("select_tmdb_candidate", { jobId, mediaType, tmdbId });
 }
@@ -128,7 +136,7 @@ export async function planSplits(jobId: string): Promise<void> {
 
 export async function updateJobProfile(
   jobId: string,
-  discScope: "full_season" | "partial_season" | "special" | "custom" | "compilation",
+  discScope: DiscScope,
   seasonNumber?: number | null,
   episodeRangeStart?: number | null,
   episodeRangeEnd?: number | null,
