@@ -469,6 +469,36 @@ class DiscReleaseTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_single_episode_skips_menu_analysis(self) -> None:
+        """The episode is already chosen, so VLC/dvdnav would only cost time."""
+        import autorippr.pipeline as pipeline
+
+        order = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = self._config(root, eject_after_rip=True)
+            conn = open_db(cfg.db_path)
+            try:
+                job_id = create_job(
+                    conn,
+                    disc_label="NEPHI",
+                    media_type="tv",
+                    optical_drive="E:",
+                    disc_scope="single_episode",
+                    season_number=1,
+                    episode_range_start=1,
+                    episode_range_end=1,
+                )
+                transition_job(conn, job_id, "ripping")
+                conn.commit()
+
+                with patch.object(pipeline, "execute_rip_job"),                      patch.object(pipeline, "recover_completed_rip", return_value=None),                      patch.object(pipeline, "_warn_if_nas_unreachable"),                      patch.object(pipeline, "analyze_dvd_menu", side_effect=lambda *a, **k: order.append("analyze")),                      patch.object(pipeline, "eject_drive", side_effect=lambda *a: order.append("eject") or True),                      patch.object(pipeline, "_advance_after_rip", return_value="mapping"):
+                    pipeline._execute_rip_and_advance(conn, cfg, job_id, mock_rip=False)
+
+                self.assertEqual(order, ["eject"])
+            finally:
+                conn.close()
+
     def test_menu_capture_failure_does_not_stop_the_pipeline(self) -> None:
         import autorippr.pipeline as pipeline
         from autorippr.mapper import MappingError

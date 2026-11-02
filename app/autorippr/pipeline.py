@@ -113,6 +113,17 @@ def release_disc(conn, cfg: AppConfig, job_id: str, *, reason: str) -> bool:
     return ejected
 
 
+def _episode_already_chosen(job: dict[str, Any]) -> bool:
+    """
+    Whether mapping has nothing left to learn from the disc menu.
+
+    Menu analysis drives VLC and dvdnav over the disc for a minute or more, to
+    find hints about which title is which episode. A single-episode job maps
+    its longest title to the episode the user picked and never reads them.
+    """
+    return str(job.get("disc_scope") or "") == "single_episode" and job.get("episode_range_start") is not None
+
+
 def _capture_menu_artifacts_before_release(conn, cfg: AppConfig, job_id: str) -> None:
     """
     Cache whatever the DVD menu can tell us while the disc is still readable.
@@ -686,7 +697,18 @@ def _execute_rip_and_advance(conn, cfg: AppConfig, job_id: str, *, mock_rip: boo
             if str(job.get("media_type") or "tv") == "tv":
                 # TV identifies before ripping, so the only remaining use for
                 # the disc is menu analysis. Cache it now, then let go.
-                _capture_menu_artifacts_before_release(conn, cfg, job_id)
+                if _episode_already_chosen(job):
+                    append_job_log(
+                        conn,
+                        job_id,
+                        "INFO",
+                        "Skipping DVD menu analysis: the episode was chosen when the job started.",
+                        None,
+                        None,
+                    )
+                    conn.commit()
+                else:
+                    _capture_menu_artifacts_before_release(conn, cfg, job_id)
                 release_disc(conn, cfg, job_id, reason="rip complete")
     return _advance_after_rip(conn, job_id)
 
