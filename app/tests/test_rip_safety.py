@@ -90,6 +90,17 @@ class RippedLengthTests(unittest.TestCase):
                 conn.close()
 
 
+class TitleIdFromFilenameTests(unittest.TestCase):
+    def test_digits_in_the_disc_title_are_not_the_title_number(self) -> None:
+        # Read as title 2 from "Part 2", which failed every Deathly Hallows rip.
+        self.assertEqual(rip._extract_title_id("Harry Potter and the Deathly Hallows Part 2_t00", 9), 0)
+        self.assertEqual(rip._extract_title_id("Harry Potter and the Deathly Hallows Part 1_t03", 9), 3)
+
+    def test_plain_makemkv_names_still_parse(self) -> None:
+        self.assertEqual(rip._extract_title_id("title_t01", 9), 1)
+        self.assertEqual(rip._extract_title_id("Harry Potter and the Half-Blood Prince_t01", 9), 1)
+
+
 class OnePipelinePerJobTests(unittest.TestCase):
     def test_a_second_run_does_not_start_while_the_first_holds_the_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

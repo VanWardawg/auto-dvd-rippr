@@ -1525,6 +1525,14 @@ def _build_title_metadata(
 
 
 def _extract_title_id(stem: str, fallback: int) -> int:
+    # MakeMKV names output "<disc title>_tNN", and the disc title can contain
+    # digits of its own: "Harry Potter and the Deathly Hallows Part 2_t00"
+    # matched the loose pattern below at "t 2", so the 167-minute title 0 was
+    # checked against title 2's 130 minutes and a good rip was thrown away.
+    # The suffix is authoritative; the loose pattern is for older names.
+    suffix = re.search(r"_t(\d{1,3})$", stem)
+    if suffix:
+        return int(suffix.group(1))
     match = re.search(r"(?i)(?:title|t)[_\- ]?(\d{1,3})", stem)
     if match:
         return int(match.group(1))
