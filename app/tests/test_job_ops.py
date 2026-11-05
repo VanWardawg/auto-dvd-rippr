@@ -118,6 +118,10 @@ class DeleteJobTests(unittest.TestCase):
                     "INSERT INTO finalized_manifests (job_id, manifest_json, created_at) VALUES (?,?,?)",
                     (job_id, "{}", now),
                 )
+                conn.execute(
+                    "INSERT INTO job_title_choice (job_id, chosen_title_id, updated_at) VALUES (?,?,?)",
+                    (job_id, 2, now),
+                )
                 conn.commit()
 
                 # Every referencing table must actually have a row, or this

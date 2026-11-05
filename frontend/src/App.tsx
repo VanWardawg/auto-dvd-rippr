@@ -35,6 +35,7 @@ import {
   resumePipeline,
   saveRuntimeConfig,
   startPipeline,
+  chooseTitleVersion,
 } from "./api";
 import {
   BOOLEAN_CONFIG_KEYS,
@@ -59,6 +60,8 @@ import {
   coerceConfigDraft,
   episodeLabel,
   fileNameFromPath,
+  defaultTitleVersion,
+  describeTitleVersion,
   formatBytes,
   formatCalendarDate,
   formatCompletionSince,
@@ -241,6 +244,8 @@ export default function App() {
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null);
+  // The cut picked on a multi-version disc, before it is confirmed.
+  const [versionPick, setVersionPick] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<"overview" | "activity" | "artifacts" | "json" | "settings">("overview");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -808,6 +813,13 @@ export default function App() {
   useEffect(() => {
     setActionsMenuOpen(false);
   }, [selectedJobId, snapshot?.job.status, busyAction]);
+
+  const titleVersions = snapshot?.title_versions ?? null;
+  useEffect(() => {
+    setVersionPick(titleVersions ? defaultTitleVersion(titleVersions) : null);
+    // Re-seed only when the job or its versions change, not on every poll,
+    // so a pick the user is making is not reset by the 3-second refresh.
+  }, [selectedJobId, titleVersions?.pending, titleVersions?.suggested_title_id, titleVersions?.versions.length]);
 
   async function runAction(name: string, fn: () => Promise<void>) {
     setBusyAction(name);
@@ -2174,6 +2186,50 @@ export default function App() {
               ) : null}
               <button disabled={busyAction !== null} onClick={() => void loadConfigState()}>
                 Refresh Status
+              </button>
+            </div>
+          </div>
+        ) : null}
+        {!showSettingsTab && titleVersions?.pending ? (
+          <div className="review-banner version-picker">
+            <div>
+              <strong>This disc has {titleVersions.versions.length} versions of the movie</strong>
+              <p>Choose which one to rip. Nothing has been ripped yet, and the disc stays in the drive.</p>
+              <div className="version-options" role="radiogroup" aria-label="Movie version">
+                {titleVersions.versions.map((version) => {
+                  const info = describeTitleVersion(version, titleVersions);
+                  return (
+                    <label key={version.title_id} className={`version-option${versionPick === version.title_id ? " selected" : ""}`}>
+                      <input
+                        type="radio"
+                        name="title-version"
+                        checked={versionPick === version.title_id}
+                        onChange={() => setVersionPick(version.title_id)}
+                      />
+                      <span>
+                        <strong>{info.length}</strong> <span className="version-meta">title {version.title_id}</span>
+                        <span className="version-meta">{info.details}</span>
+                        {info.hint ? <span className="version-hint">{info.hint}</span> : null}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="review-banner-actions">
+              <button
+                className="primary-button"
+                disabled={busyAction !== null || versionPick === null || !selectedJobId}
+                onClick={() =>
+                  selectedJobId &&
+                  versionPick !== null &&
+                  void runAction("Rip version", async () => {
+                    await chooseTitleVersion(selectedJobId, versionPick);
+                    await resumePipeline(selectedJobId);
+                  })
+                }
+              >
+                Rip this version
               </button>
             </div>
           </div>

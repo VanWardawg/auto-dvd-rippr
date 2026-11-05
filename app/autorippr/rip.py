@@ -17,6 +17,9 @@ from typing import Any
 
 from .config import AppConfig
 from .makemkv import (
+    feature_versions,
+    parse_audio_languages,
+    source_name,
     PROGRESS_MAX,
     adaptive_episode_window,
     build_title_candidates,
@@ -27,7 +30,8 @@ from .makemkv import (
 )
 from .progress import clear_progress, upsert_progress
 from .logger import get_logger
-from .state import append_job_log, get_job
+from .state import append_job_log, get_job, now_iso, set_awaiting_review
+from .tmdb import lookup_movie_runtime_minutes
 
 
 log = get_logger("rip")
@@ -474,6 +478,17 @@ def recover_completed_rip(conn, cfg: AppConfig, job_id: str) -> dict[str, Any] |
     # already sitting on disk, finished.
     if not makemkv_said_done and not _durations_match_the_disc(titles, disc_info_by_title):
         return None
+    if not _recovered_rip_is_the_chosen_version(conn, job_id, titles, disc_info_by_title):
+        append_job_log(
+            conn=conn,
+            job_id=job_id,
+            level="WARNING",
+            message="Not recovering the existing rip: the disc has several versions of the movie and this is not the chosen one.",
+            from_status=None,
+            to_status=None,
+        )
+        conn.commit()
+        return None
     mismatches = _titles_not_matching_the_scan(titles, disc_info_by_title)
     if mismatches:
         append_job_log(
@@ -662,6 +677,9 @@ def _plan_title_selection(
 
     job = get_job(conn, job_id) or {}
     candidates = build_title_candidates(disc_info_by_title)
+    chosen = _resolve_version_choice(conn, cfg, job, candidates, disc_info_by_title)
+    if chosen is not None:
+        return chosen
     typical_runtime = _tmdb_episode_runtime_minutes(conn, cfg, job)
     min_minutes, max_minutes = adaptive_episode_window(
         typical_runtime, cfg.min_episode_minutes, cfg.max_episode_minutes
@@ -709,6 +727,214 @@ def _plan_title_selection(
     if selection.is_everything or not selection.title_ids:
         return None, {}
     return selection.title_ids, selection.alternates
+
+
+class TitleChoiceNeeded(Exception):
+    """The disc holds several cuts of the movie; the job waits for a pick."""
+
+
+# A suggested cut must be this close to TMDB's runtime to be called the film.
+SUGGESTION_TOLERANCE_MINUTES = 10.0
+
+
+def _resolve_version_choice(
+    conn,
+    cfg: AppConfig,
+    job: dict[str, Any],
+    candidates,
+    disc_info_by_title: dict[int, dict[str, Any]],
+) -> tuple[list[int], dict[int, list[int]]] | None:
+    """
+    The title to rip when a single-movie disc has several cuts, or None.
+
+    None means there is nothing to decide -- one cut, or not a single-movie
+    job -- and normal selection applies. Several cuts and no choice yet pauses
+    the job by raising TitleChoiceNeeded, before anything is ripped.
+    """
+    if str(job.get("media_type") or "") != "movie" or str(job.get("movie_mode") or "single") != "single":
+        return None
+    versions = feature_versions(candidates)
+    if len(versions) < 2:
+        return None
+
+    job_id = str(job["id"])
+    row = conn.execute("SELECT * FROM job_title_choice WHERE job_id = ?", (job_id,)).fetchone()
+    picked = _match_chosen_version(row, versions, disc_info_by_title) if row else None
+    if picked is not None:
+        twins = [
+            c.title_id
+            for c in sorted(candidates, key=lambda c: (-c.size_bytes, c.title_id))
+            if c.title_id != picked.title_id and abs(c.duration_seconds - picked.duration_seconds) <= 5
+        ]
+        append_job_log(
+            conn=conn,
+            job_id=job_id,
+            level="INFO",
+            message=(
+                f"Title selection: ripping the chosen version, title {picked.title_id} "
+                f"({_format_length(picked.duration_seconds)})."
+            ),
+            from_status=None,
+            to_status=None,
+        )
+        conn.commit()
+        return [picked.title_id], ({picked.title_id: twins} if twins else {})
+
+    suggested = _suggest_version(conn, cfg, versions, disc_info_by_title)
+    conn.execute(
+        """
+        INSERT INTO job_title_choice (job_id, suggested_title_id, suggested_runtime_minutes, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(job_id) DO UPDATE SET
+            suggested_title_id = excluded.suggested_title_id,
+            suggested_runtime_minutes = excluded.suggested_runtime_minutes,
+            chosen_title_id = NULL,
+            chosen_source = NULL,
+            chosen_duration_seconds = NULL,
+            updated_at = excluded.updated_at
+        """,
+        (job_id, suggested[0] if suggested else None, suggested[1] if suggested else None, now_iso()),
+    )
+    lengths = ", ".join(f"title {v.title_id} ({_format_length(v.duration_seconds)})" for v in versions)
+    append_job_log(
+        conn=conn,
+        job_id=job_id,
+        level="INFO",
+        message=f"This disc has {len(versions)} versions of the movie: {lengths}. Choose one to rip.",
+        from_status=None,
+        to_status=None,
+    )
+    conn.commit()
+    clear_progress(conn, job_id)
+    set_awaiting_review(conn, job_id, True)
+    raise TitleChoiceNeeded(f"Choose which version of the movie to rip ({lengths}).")
+
+
+def _recovered_rip_is_the_chosen_version(conn, job_id: str, titles, disc_info_by_title) -> bool:
+    """
+    Whether leftover output may stand in for a rip on a multi-version disc.
+
+    Recovery predates version choice: without this, Resume on a job whose
+    last attempt ripped the longest cut would reuse that file and never ask.
+    """
+    job = get_job(conn, job_id) or {}
+    if str(job.get("media_type") or "") != "movie" or str(job.get("movie_mode") or "single") != "single":
+        return True
+    versions = feature_versions(build_title_candidates(disc_info_by_title))
+    if len(versions) < 2:
+        return True
+    row = conn.execute("SELECT * FROM job_title_choice WHERE job_id = ?", (job_id,)).fetchone()
+    picked = _match_chosen_version(row, versions, disc_info_by_title) if row else None
+    if picked is None:
+        return False
+    return all(
+        abs(float(getattr(t, "duration_seconds", 0) or 0) - picked.duration_seconds) <= max(10.0, picked.duration_seconds * 0.05)
+        for t in titles
+    )
+
+
+def _match_chosen_version(row, versions, disc_info_by_title: dict[int, dict[str, Any]]):
+    """Find the chosen cut in a fresh scan: by source playlist, then by length."""
+    source = str(row["chosen_source"] or "")
+    duration = float(row["chosen_duration_seconds"] or 0)
+    if not duration:
+        return None
+    for version in versions:
+        same_length = abs(version.duration_seconds - duration) <= 5
+        if same_length and (not source or source_name(disc_info_by_title.get(version.title_id, {})) == source):
+            return version
+    return None
+
+
+def _suggest_version(conn, cfg: AppConfig, versions, disc_info_by_title) -> tuple[int, float] | None:
+    """The cut whose length matches TMDB's runtime for the film, if one does."""
+    queries: list[str] = []
+    for version in versions:
+        name = str((disc_info_by_title.get(version.title_id, {}).get("fields") or {}).get("2") or "")
+        if name and name not in queries:
+            queries.append(name)
+    runtime = lookup_movie_runtime_minutes(conn, cfg, queries) if queries else None
+    if not runtime:
+        return None
+    best = min(versions, key=lambda v: abs(v.duration_minutes - runtime))
+    if abs(best.duration_minutes - runtime) > SUGGESTION_TOLERANCE_MINUTES:
+        return None
+    return best.title_id, runtime
+
+
+def choose_title_version(conn, cfg: AppConfig, job_id: str, title_id: int) -> dict[str, Any]:
+    """Record which cut to rip; the next pipeline run rips it."""
+    info = _saved_disc_info(cfg, job_id)
+    versions = feature_versions(build_title_candidates(info))
+    picked = next((v for v in versions if v.title_id == title_id), None)
+    if picked is None:
+        raise RipError(f"Title {title_id} is not one of the movie versions on this disc.")
+    conn.execute(
+        """
+        INSERT INTO job_title_choice (job_id, chosen_title_id, chosen_source, chosen_duration_seconds, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(job_id) DO UPDATE SET
+            chosen_title_id = excluded.chosen_title_id,
+            chosen_source = excluded.chosen_source,
+            chosen_duration_seconds = excluded.chosen_duration_seconds,
+            updated_at = excluded.updated_at
+        """,
+        (job_id, picked.title_id, source_name(info.get(picked.title_id, {})), picked.duration_seconds, now_iso()),
+    )
+    append_job_log(
+        conn=conn,
+        job_id=job_id,
+        level="INFO",
+        message=f"Version chosen: title {picked.title_id} ({_format_length(picked.duration_seconds)}).",
+        from_status=None,
+        to_status=None,
+    )
+    conn.commit()
+    set_awaiting_review(conn, job_id, False)
+    return {"job_id": job_id, "title_id": picked.title_id, "duration_seconds": picked.duration_seconds}
+
+
+def describe_title_versions(conn, cfg: AppConfig, job: dict[str, Any]) -> dict[str, Any] | None:
+    """The cuts on a single-movie disc and the choice so far, for the UI."""
+    if str(job.get("media_type") or "") != "movie" or str(job.get("movie_mode") or "single") != "single":
+        return None
+    info_path = Path(cfg.staging_root) / "jobs" / str(job["id"]) / "logs" / "makemkv_disc_info.log"
+    try:
+        text = info_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    info = _parse_makemkv_info_output(text)
+    versions = feature_versions(build_title_candidates(info))
+    if len(versions) < 2:
+        return None
+    row = conn.execute("SELECT * FROM job_title_choice WHERE job_id = ?", (str(job["id"]),)).fetchone()
+    audio = parse_audio_languages(text)
+    chosen = int(row["chosen_title_id"]) if row and row["chosen_title_id"] is not None else None
+    return {
+        "pending": bool(job.get("awaiting_review")) and str(job.get("status")) == "ripping" and chosen is None,
+        "chosen_title_id": chosen,
+        "suggested_title_id": row["suggested_title_id"] if row else None,
+        "tmdb_runtime_minutes": row["suggested_runtime_minutes"] if row else None,
+        "versions": [
+            {
+                "title_id": v.title_id,
+                "duration_seconds": v.duration_seconds,
+                "chapter_count": v.chapter_count,
+                "size_bytes": v.size_bytes,
+                "audio_languages": audio.get(v.title_id, []),
+                "source": source_name(info.get(v.title_id, {})),
+            }
+            for v in versions
+        ],
+    }
+
+
+def _saved_disc_info(cfg: AppConfig, job_id: str) -> dict[int, dict[str, Any]]:
+    path = Path(cfg.staging_root) / "jobs" / job_id / "logs" / "makemkv_disc_info.log"
+    try:
+        return _parse_makemkv_info_output(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return {}
 
 
 def _disc_scan_timeout_seconds(cfg: AppConfig, optical_drive: str | None) -> int:

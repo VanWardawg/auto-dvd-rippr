@@ -192,6 +192,24 @@ export interface StorageState {
   staging_root: string;
 }
 
+/** One cut of the movie on a disc that carries several. */
+export interface TitleVersion {
+  title_id: number;
+  duration_seconds: number;
+  chapter_count: number;
+  size_bytes: number;
+  audio_languages: string[];
+  source: string;
+}
+
+export interface TitleVersions {
+  pending: boolean;
+  chosen_title_id: number | null;
+  suggested_title_id: number | null;
+  tmdb_runtime_minutes: number | null;
+  versions: TitleVersion[];
+}
+
 export interface JobSnapshot {
   job: JobSummary;
   logs: JobLog[];
@@ -199,6 +217,7 @@ export interface JobSnapshot {
   selected_movies?: SelectedMovieSlot[];
   // The rip title each movie slot will be named from -- picked or defaulted.
   movie_slot_sources?: MovieSlotSource[];
+  title_versions?: TitleVersions | null;
   tmdb_candidates: TmdbCandidate[];
   episode_mappings: EpisodeMapping[];
   split_plans: SplitPlan[];

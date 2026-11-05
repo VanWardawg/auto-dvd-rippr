@@ -129,6 +129,7 @@ fn main() {
             search_tv_shows,
             get_tv_show_seasons,
             get_season_episodes,
+            choose_title_version,
             select_tmdb_candidate,
             override_mapping,
             override_mapping_source,
@@ -370,6 +371,12 @@ async fn get_tv_show_seasons(
     }
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     run_python_json(&refs)
+}
+
+/// Pick which cut of the movie to rip when a disc carries several.
+#[tauri::command]
+async fn choose_title_version(job_id: String, title_id: i64) -> Result<Value, String> {
+    run_python_json(&["rip", "choose-version", &job_id, &title_id.to_string()])
 }
 
 #[tauri::command]

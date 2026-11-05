@@ -10,6 +10,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   BOOLEAN_CONFIG_KEYS,
+  defaultTitleVersion,
+  describeTitleVersion,
   buildDriveCardState,
   deserializeDriveCards,
   serializeDriveCards,
@@ -777,3 +779,38 @@ describe("single-episode discs", () => {
     expect(clearPickedEpisode(partial)).toBe(partial);
   });
 });
+
+describe("multi-version discs", () => {
+  // Deathly Hallows Part 2: the film, and Maximum Movie Mode.
+  const versions = {
+    pending: true,
+    chosen_title_id: null,
+    suggested_title_id: 2,
+    tmdb_runtime_minutes: 130,
+    versions: [
+      { title_id: 0, duration_seconds: 10045, chapter_count: 41, size_bytes: 25e9, audio_languages: ["English", "English"], source: "00200.mpls" },
+      { title_id: 2, duration_seconds: 7826, chapter_count: 28, size_bytes: 24e9, audio_languages: ["English", "English", "French"], source: "00100.mpls" },
+    ],
+  };
+
+  it("opens on the cut matching TMDB, not the longest", () => {
+    expect(defaultTitleVersion(versions)).toBe(2);
+  });
+
+  it("keeps a choice already made", () => {
+    expect(defaultTitleVersion({ ...versions, chosen_title_id: 0 })).toBe(0);
+  });
+
+  it("falls back to the first cut without a suggestion", () => {
+    expect(defaultTitleVersion({ ...versions, suggested_title_id: null })).toBe(0);
+  });
+
+  it("explains each cut", () => {
+    const film = describeTitleVersion(versions.versions[1], versions);
+    expect(film.length).toBe("2:10:26");
+    expect(film.hint).toContain("TMDB");
+    expect(film.details).toContain("Audio: English, French");
+    expect(describeTitleVersion(versions.versions[0], versions).hint).toContain("extended");
+  });
+});
+

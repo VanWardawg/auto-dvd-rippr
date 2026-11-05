@@ -274,6 +274,81 @@ def _select_movie_titles(candidates: list[TitleCandidate], *, movie_mode: str) -
     )
 
 
+# Two full-length titles closer than this are the same cut with different
+# credits or a logo; further apart, they are different versions of the movie.
+DISTINCT_VERSION_SECONDS = 120.0
+
+
+def feature_versions(candidates: list[TitleCandidate]) -> list[TitleCandidate]:
+    """
+    The distinct full-length versions of a movie on the disc, longest first.
+
+    One entry per cut: same-length copies collapse to the largest, as in
+    _select_movie_titles. More than one entry means the disc holds several
+    cuts -- theatrical and extended, or a "Maximum Movie Mode" playlist that
+    splices featurettes into the film -- and only a person can say which one
+    belongs in the library. Longest-wins picked the 167-minute Maximum Movie
+    Mode cut of Deathly Hallows Part 2 over the 130-minute film.
+    """
+    timed = [c for c in candidates if c.duration_seconds > 0]
+    if not timed:
+        return []
+    longest = max(c.duration_seconds for c in timed)
+    floor = max(longest * 0.60, MIN_FEATURE_VERSION_MINUTES * 60.0)
+    features = sorted(
+        (c for c in timed if c.duration_seconds >= floor),
+        key=lambda c: (-c.duration_seconds, -c.size_bytes, c.title_id),
+    )
+    versions: list[TitleCandidate] = []
+    for candidate in features:
+        twin = next(
+            (v for v in versions if abs(v.duration_seconds - candidate.duration_seconds) < DISTINCT_VERSION_SECONDS),
+            None,
+        )
+        if twin is None:
+            versions.append(candidate)
+        elif candidate.size_bytes > twin.size_bytes and abs(candidate.duration_seconds - twin.duration_seconds) <= 5:
+            versions[versions.index(twin)] = candidate
+    return versions
+
+
+# Shorter than this is a featurette or a TV special, not a cut of the film.
+MIN_FEATURE_VERSION_MINUTES = 45.0
+
+
+def source_name(entry: dict[str, Any]) -> str:
+    """The playlist or stream file a title was built from (e.g. 00100.mpls)."""
+    return str((entry.get("fields") or {}).get(str(ATTR_SOURCE_FILE_NAME)) or "")
+
+
+def parse_audio_languages(info_text: str) -> dict[int, list[str]]:
+    """Each title's audio track languages, in disc order, from SINFO lines."""
+    kinds: dict[tuple[int, int], str] = {}
+    languages: dict[tuple[int, int], str] = {}
+    for raw in info_text.splitlines():
+        line = raw.strip()
+        if not line.startswith("SINFO:"):
+            continue
+        parts = line[len("SINFO:"):].split(",", 4)
+        if len(parts) < 5:
+            continue
+        try:
+            key = (int(parts[0]), int(parts[1]))
+            code = int(parts[2])
+        except ValueError:
+            continue
+        value = parts[4].strip().strip('"')
+        if code == 1:
+            kinds[key] = value
+        elif code == 4:
+            languages[key] = value
+    result: dict[int, list[str]] = {}
+    for key in sorted(kinds):
+        if kinds[key] == "Audio":
+            result.setdefault(key[0], []).append(languages.get(key) or "Unknown")
+    return result
+
+
 def _select_tv_titles(
     candidates: list[TitleCandidate],
     *,

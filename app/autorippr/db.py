@@ -168,6 +168,20 @@ CREATE TABLE IF NOT EXISTS transfer_attempts (
     FOREIGN KEY(output_id) REFERENCES outputs(id)
 );
 
+-- Which cut of a movie to rip when a disc carries more than one (theatrical,
+-- extended, "Maximum Movie Mode"). Keyed by the source playlist rather than
+-- MakeMKV's title number, which can shift between scans.
+CREATE TABLE IF NOT EXISTS job_title_choice (
+    job_id TEXT PRIMARY KEY,
+    suggested_title_id INTEGER,
+    suggested_runtime_minutes REAL,
+    chosen_title_id INTEGER,
+    chosen_source TEXT,
+    chosen_duration_seconds REAL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(job_id) REFERENCES jobs(id)
+);
+
 CREATE TABLE IF NOT EXISTS job_progress (
     job_id TEXT PRIMARY KEY,
     stage TEXT NOT NULL,
@@ -197,7 +211,7 @@ CREATE TABLE IF NOT EXISTS job_progress (
 # writing progress at the same time. Gating on PRAGMA user_version means the
 # DDL runs once per schema change instead. Forget to bump it and your new
 # table will not appear on existing databases.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def open_db(db_path: str) -> sqlite3.Connection:

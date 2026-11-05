@@ -1457,6 +1457,54 @@ input::placeholder {
   flex-shrink: 0;
 }
 
+.review-banner.version-picker {
+  align-items: flex-start;
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.version-options {
+  display: grid;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+
+.version-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  cursor: pointer;
+}
+
+.version-option.selected {
+  border-color: var(--accent);
+}
+
+.version-option input {
+  margin-top: 0.2rem;
+}
+
+.version-meta,
+.version-hint {
+  display: block;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.version-option strong + .version-meta {
+  display: inline;
+  margin-left: 0.3rem;
+}
+
+.version-hint {
+  color: var(--accent);
+}
+
 /* ------------------------------------------------------------ responsive */
 
 /* Below the app's own minWidth (1180) the two-column layout still fits: the

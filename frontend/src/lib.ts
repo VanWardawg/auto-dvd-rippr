@@ -18,6 +18,8 @@ import type {
   SelectedMovieSlot,
   SplitPlan,
   StartJobRequest,
+  TitleVersion,
+  TitleVersions,
   TmdbCandidate,
 } from "./types";
 
@@ -167,6 +169,49 @@ export function formatBytes(bytes?: number | null) {
   const gb = bytes / 1024 ** 3;
   if (gb >= 1) return `${gb.toFixed(gb >= 10 ? 0 : 1)} GB`;
   return `${Math.max(1, Math.round(bytes / 1024 ** 2))} MB`;
+}
+
+/** "2:10:26" -- a film's length the way disc menus and boxes print it. */
+export function formatRunLength(seconds: number) {
+  const total = Math.max(0, Math.round(seconds));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+/**
+ * How one cut of the movie is presented when a disc carries several.
+ *
+ * The hint is what lets someone choose without knowing playlist numbers: the
+ * cut matching TMDB's runtime is the film as released, and a much longer one
+ * is an extended cut or a bonus-feature mode such as Maximum Movie Mode.
+ */
+export function describeTitleVersion(version: TitleVersion, versions: TitleVersions) {
+  const details = [
+    `${version.chapter_count} chapters`,
+    formatBytes(version.size_bytes),
+    version.audio_languages.length ? `Audio: ${[...new Set(version.audio_languages)].join(", ")}` : null,
+  ].filter(Boolean);
+  let hint: string | null = null;
+  if (version.title_id === versions.suggested_title_id && versions.tmdb_runtime_minutes) {
+    hint = `Matches TMDB's runtime (${Math.round(versions.tmdb_runtime_minutes)} min) -- likely the film as released`;
+  } else if (versions.suggested_title_id != null) {
+    const suggested = versions.versions.find((v) => v.title_id === versions.suggested_title_id);
+    if (suggested && version.duration_seconds > suggested.duration_seconds) {
+      hint = "Longer than the film -- an extended cut or a bonus-feature mode";
+    } else if (suggested) {
+      hint = "Shorter than the film";
+    }
+  }
+  return { length: formatRunLength(version.duration_seconds), details: details.join(" · "), hint };
+}
+
+/** The cut selected when the picker opens: TMDB's match, else the first listed. */
+export function defaultTitleVersion(versions: TitleVersions): number | null {
+  if (versions.chosen_title_id != null) return versions.chosen_title_id;
+  if (versions.suggested_title_id != null) return versions.suggested_title_id;
+  return versions.versions[0]?.title_id ?? null;
 }
 
 export function parseTitles(value?: string) {

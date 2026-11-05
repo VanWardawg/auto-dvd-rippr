@@ -9,7 +9,7 @@ from .job_ops import purge_local_files
 from .joblock import JobAlreadyRunningError, job_run_lock
 from .logger import get_logger
 from .naming import NamingError, finalize_job_outputs
-from .rip import RipError, eject_drive, execute_rip_job, recover_completed_rip
+from .rip import RipError, TitleChoiceNeeded, eject_drive, execute_rip_job, recover_completed_rip
 from .splitter import SplitError, execute_splits, plan_splits_for_job
 from .state import InvalidTransitionError, append_job_log, get_job, set_awaiting_review, transition_job
 from .tmdb import TmdbError, identify_job_with_tmdb
@@ -485,6 +485,10 @@ def _run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = Fa
             _reclaim_local_space(conn, cfg, job_id)
 
         return {"status": status}
+    except TitleChoiceNeeded as exc:
+        # Not a failure: the disc has several cuts of the movie and the job
+        # waits, still in ripping with the disc in the drive, for a pick.
+        return {"status": "ripping", "needs_review": True, "title_choice": str(exc)}
     except (RipError, TmdbError, MappingError, SplitError, NamingError, TransferError) as exc:
         _transition_job_to_error_if_active(conn, job_id, str(exc))
         raise

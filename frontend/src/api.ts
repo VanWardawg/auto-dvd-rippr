@@ -91,6 +91,11 @@ export async function getSeasonEpisodes(tmdbId: number, seasonNumber: number): P
   return result.episodes;
 }
 
+/** Pick the cut to rip on a multi-version disc; Resume then rips it. */
+export async function chooseTitleVersion(jobId: string, titleId: number): Promise<void> {
+  await invoke("choose_title_version", { jobId, titleId });
+}
+
 export async function selectTmdbCandidate(jobId: string, mediaType: "tv" | "movie", tmdbId: number): Promise<void> {
   return invoke("select_tmdb_candidate", { jobId, mediaType, tmdbId });
 }

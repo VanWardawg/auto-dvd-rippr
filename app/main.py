@@ -22,7 +22,14 @@ from autorippr.state import (
     transition_job,
     update_job_disc_profile,
 )
-from autorippr.rip import RipError, discover_optical_drives, execute_rip_job, get_makemkv_status
+from autorippr.rip import (
+    RipError,
+    choose_title_version,
+    describe_title_versions,
+    discover_optical_drives,
+    execute_rip_job,
+    get_makemkv_status,
+)
 from autorippr.tmdb import (
     TmdbError,
     fetch_tmdb_tv_episodes,
@@ -530,7 +537,7 @@ def _build_review_state(
             rip_details.append(
                 "Movie job has multiple rip titles, but none are at least 45 minutes long."
             )
-    if str(job.get("status")) == "ripping":
+    if str(job.get("status")) == "ripping" and not job.get("awaiting_review"):
         # A rip is stalled when MakeMKV keeps reporting but stops advancing.
         # job_progress tracks both separately: updated_at moves on every
         # heartbeat, last_advance_at only when the work actually progressed.
@@ -687,6 +694,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     rip = sub.add_parser("rip", help="Rip workflow commands")
     rip_sub = rip.add_subparsers(dest="rip_command")
+    rip_choose = rip_sub.add_parser(
+        "choose-version", help="Pick which version of the movie to rip when a disc has several"
+    )
+    rip_choose.add_argument("job_id")
+    rip_choose.add_argument("title_id", type=int)
 
     rip_drives = rip_sub.add_parser("drives", help="List optical drives/disc status")
     rip_drives.set_defaults(_cmd="rip_drives")
@@ -1010,6 +1022,7 @@ def main() -> int:
                         "selected_media": dict(selected_media) if selected_media else None,
                         "selected_movies": [dict(r) for r in selected_movies],
                         "movie_slot_sources": _movie_slot_sources(conn, job, selected_movies),
+                        "title_versions": describe_title_versions(conn, cfg, job),
                         "season_episodes": season_episodes,
                         "all_season_episodes": all_season_episodes,
                         "tmdb_candidates": [dict(r) for r in tmdb_rows],
@@ -1119,6 +1132,13 @@ def main() -> int:
             return 0
 
     if args.command == "rip":
+        if args.rip_command == "choose-version":
+            try:
+                print(json.dumps(choose_title_version(conn, cfg, args.job_id, args.title_id), indent=2))
+                return 0
+            except RipError as exc:
+                print(f"Rip error: {exc}", file=sys.stderr)
+                return 5
         if args.rip_command == "drives":
             print(json.dumps({"drives": discover_optical_drives()}, indent=2))
             return 0

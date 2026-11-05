@@ -883,6 +883,36 @@ def _resolve_candidate_runtime(
     _apply_runtime_to_candidate(candidate, avg_runtime_minutes, runtime)
 
 
+def lookup_movie_runtime_minutes(conn, cfg: AppConfig, queries: list[str]) -> float | None:
+    """
+    The runtime TMDB gives the best match for a movie title, or None.
+
+    Used before a rip, to suggest which cut on a multi-version disc is the
+    film itself. Best effort: no key, no network or no match just means no
+    suggestion, never a failed rip.
+    """
+    for query in queries:
+        normalized = _normalize_identify_query(query, "movie")
+        if not normalized:
+            continue
+        try:
+            ranked = _rank_candidates_for_query_variants(
+                conn=conn,
+                cfg=cfg,
+                media_type="movie",
+                query_variants=[{"query": normalized, "source": "title_choice"}],
+                hint_year=None,
+                hint_season=None,
+                avg_runtime_minutes=None,
+            )
+        except Exception:
+            continue
+        movies = [c for c in ranked if c.get("media_type") == "movie"]
+        if movies:
+            return _fetch_candidate_runtime(conn, cfg, movies[0])
+    return None
+
+
 def _fetch_candidate_runtime(conn, cfg: AppConfig, candidate: dict[str, Any]) -> float | None:
     """Runtime in minutes from the detail endpoint, or None if unavailable."""
     media_type = str(candidate.get("media_type") or "")
