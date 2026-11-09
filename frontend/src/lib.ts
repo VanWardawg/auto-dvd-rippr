@@ -533,6 +533,7 @@ export function buildConfigDraft(config?: Record<string, unknown> | null) {
     eject_after_rip: String(source.eject_after_rip ?? false),
     verify_transfers: String(source.verify_transfers ?? false),
     clear_local_after_transfer: String(source.clear_local_after_transfer ?? false),
+    notify_webhook_url: String(source.notify_webhook_url ?? ""),
   };
 }
 

@@ -70,6 +70,7 @@ class RuntimeRegressionTests(unittest.TestCase):
 
                 with (
                     patch("autorippr.pipeline.recover_completed_rip", return_value=None),
+                    patch("autorippr.pipeline._identify_movie_early"),
                     patch("autorippr.pipeline.execute_rip_job", side_effect=RipError("rip exploded")),
                 ):
                     with self.assertRaises(RipError):

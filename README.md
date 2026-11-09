@@ -70,6 +70,49 @@ where it can.
 Configuration lives in `%APPDATA%\Auto-Ripper\config.json`, editable from the
 in-app Settings tab.
 
+### Notifications
+
+Auto-Ripper can tell you when a job needs you, so you do not have to watch it.
+Set **Notification webhook URL** in Settings and it will POST a small JSON
+document to that URL when a job stops to ask something, fails, or finishes:
+
+```json
+{
+  "app": "Auto-Ripper",
+  "event": "needs_attention",
+  "title": "Auto-Ripper needs you",
+  "message": "HARRY_POTTER_2: confirm which movie this is. It is ripping meanwhile.",
+  "job_id": "…",
+  "disc_label": "HARRY_POTTER_2",
+  "status": "ripping"
+}
+```
+
+`event` is one of `needs_attention`, `failed`, `finished` or `test`. Anything
+that accepts a POST will do — ntfy, Node-RED, a chat webhook behind a small
+relay. For Home Assistant, create an automation with a **Webhook** trigger and
+use its URL (`http://<your-ha-host>:8123/api/webhook/<webhook id>`):
+
+```yaml
+triggers:
+  - trigger: webhook
+    webhook_id: pick-a-long-random-id
+    allowed_methods: [POST]
+    local_only: true
+actions:
+  - action: notify.mobile_app_your_phone
+    data:
+      title: "{{ trigger.json.title }}"
+      message: "{{ trigger.json.message }}"
+```
+
+Add a condition on `trigger.json.event` if you only want some of them. The
+webhook URL works like a password — anyone who has it can trigger the
+automation — so keep `local_only` on, and note that Auto-Ripper stores the URL
+only in your local `config.json` and never writes it to a log. **Save and send
+a test** in Settings confirms it works. Leave the field empty for no
+notifications.
+
 ### Command line
 
 The desktop app is a front end over a full CLI, which is useful for debugging

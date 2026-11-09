@@ -54,6 +54,7 @@ a `#[tauri::command]` in `main.rs` that shells to it → add a wrapper in
 | `naming.py` | Plex naming and local finalization |
 | `transfer.py` | NAS copy with retries and checksums |
 | `job_ops.py` | Delete/cancel/clear/remap operations |
+| `notify.py` | Optional webhook POST when a job needs a person, fails, or finishes |
 
 ### Job state machine
 
@@ -89,6 +90,11 @@ TV and movie jobs take different paths: **TV identifies before ripping**
   the job's status in the DB and abort if it left the expected state — see
   `_job_is_still_ripping` in `rip.py`.
 - Progress goes in the `job_progress` table, not into log messages.
+- **The notification webhook URL is a secret.** It must never appear in a log
+  line, a job record, an error message, or anything the UI echoes back.
+- **Nothing that helps a person may be able to fail the job.** Notifications,
+  the early TMDB lookup and log archiving are all best effort: catch, log, and
+  carry on with the rip.
 - **`--minlength` must match between the disc scan and the rip.** MakeMKV
   renumbers titles after length filtering, so scanning with one value and
   ripping with another makes selected title IDs point at different titles.

@@ -131,6 +131,8 @@ export interface TmdbCandidate {
 
 export interface ReviewLane {
   needed: boolean;
+  /** Offered while the job is still working; it is not blocked on the answer. */
+  early?: boolean;
   reason?: string | null;
   threshold: number;
   details?: string[];

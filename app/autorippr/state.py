@@ -187,6 +187,18 @@ def transition_job(conn, job_id: str, to_status: str, error_message: str | None 
         (to_status, to_status, ts, error_message, job_id),
     )
 
+    if to_status == "error" and error_message:
+        # jobs.error_message is cleared by the retry, so without this row the
+        # reason a job failed is gone the moment someone presses Resume -- and
+        # 25 failures later nobody could say what any of them had been.
+        append_job_log(
+            conn=conn,
+            job_id=job_id,
+            level="ERROR",
+            message=f"Failed: {error_message}",
+            from_status=None,
+            to_status=None,
+        )
     append_job_log(
         conn=conn,
         job_id=job_id,

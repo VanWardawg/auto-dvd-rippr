@@ -183,6 +183,14 @@ export async function getReclaimableSpace(): Promise<ReclaimableSummary> {
   return invoke<ReclaimableSummary>("reclaimable_space");
 }
 
+/**
+ * POST a test message to the configured webhook. Reports the outcome rather
+ * than throwing, so Settings can say why nothing arrived.
+ */
+export async function sendTestNotification(): Promise<{ sent: boolean; detail: string }> {
+  return invoke<{ sent: boolean; detail: string }>("send_test_notification");
+}
+
 export async function reclaimCompletedJobs(): Promise<{ freed_bytes: number; job_count: number }> {
   return invoke<{ freed_bytes: number; job_count: number }>("reclaim_completed");
 }

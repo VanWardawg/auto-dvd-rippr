@@ -13,10 +13,17 @@ Worth knowing when judging the risk of an issue:
 - **Your TMDB API key** lives in `%APPDATA%\Auto-Ripper\config.json` in plain
   text, readable by anything running as your user. It is a free, read-only,
   personal-use key; treat it as low value but do not paste it into a bug report.
-- **The network.** The app talks to exactly two places: `api.themoviedb.org`
-  for identification, and the MakeMKV forum page it reads to check when the
-  public beta key expires. Nothing else, and nothing is sent anywhere about
-  what you rip.
+- **The network.** By default the app talks to exactly two places:
+  `api.themoviedb.org` for identification, and the MakeMKV forum page it reads
+  to check when the public beta key expires. If you set a notification webhook
+  URL, it also POSTs to that URL -- the disc label, the job's status and a
+  one-line message -- when a job needs you, fails, or finishes. Nothing else,
+  and nothing is sent anywhere you did not configure.
+- **Your notification webhook URL**, if you set one, is a credential: anyone
+  holding it can trigger whatever it is wired to. It is stored in plain text
+  in the same `config.json`, is never written to a log or a job record, and
+  only `http://` and `https://` URLs are accepted. Do not paste it into a bug
+  report.
 - **External executables.** MakeMKV, ffmpeg, ffprobe and optionally tesseract
   are launched from the paths in your config. Those paths are entered by you
   in Settings; the app does not download or update them.

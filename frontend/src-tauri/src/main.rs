@@ -145,6 +145,7 @@ fn main() {
             set_window_theme,
             reclaimable_space,
             reclaim_completed,
+            send_test_notification,
             open_path
         ])
         .run(tauri::generate_context!())
@@ -572,6 +573,12 @@ fn set_window_theme(window: tauri::Window, theme: String) -> Result<(), String> 
 #[tauri::command]
 async fn reclaimable_space() -> Result<Value, String> {
     run_python_json(&["job", "reclaimable"])
+}
+
+/// Send a test message to the webhook in the saved config.
+#[tauri::command]
+async fn send_test_notification() -> Result<Value, String> {
+    run_python_json(&["notify-test"])
 }
 
 #[tauri::command]

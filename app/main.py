@@ -12,6 +12,7 @@ from typing import Any
 from autorippr.config import ConfigError, load_config
 from autorippr.db import open_db
 from autorippr.logger import configure_logging, get_logger
+from autorippr.notify import EVENT_TEST, send_notification
 from autorippr.state import (
     set_awaiting_review,
     InvalidTransitionError,
@@ -457,9 +458,30 @@ def _build_review_state(
     tmdb_needed = job.get("status") == "identifying" and (
         len(selected_movies) < required_movie_slots if multi_movie_mode else selected_media is None
     )
+    # A movie whose label TMDB could not place is asked about as the rip
+    # starts. The job is not blocked -- it is ripping -- so this is flagged
+    # separately and the UI offers the choice without showing the job as stuck.
+    tmdb_early = (
+        job.get("status") == "ripping"
+        and str(job.get("media_type") or "tv") == "movie"
+        and not multi_movie_mode
+        and selected_media is None
+        and any(
+            str(entry.get("message") or "").startswith(
+                ("TMDB candidates need manual review", "TMDB search returned no candidates")
+            )
+            for entry in logs
+        )
+    )
+    tmdb_needed = tmdb_needed or tmdb_early
     tmdb_reason = None
     if tmdb_needed:
-        if multi_movie_mode:
+        if tmdb_early:
+            tmdb_reason = (
+                "TMDB could not tell which movie this is from the disc label. Choose it now "
+                "and the job will carry straight on when the rip finishes."
+            )
+        elif multi_movie_mode:
             tmdb_reason = (
                 f"Select movies in order: {len(selected_movies)}/{required_movie_slots} slots filled."
             )
@@ -587,6 +609,7 @@ def _build_review_state(
         },
         "tmdb": {
             "needed": tmdb_needed,
+            "early": tmdb_early,
             "reason": tmdb_reason,
             "threshold": tmdb_threshold,
             "candidate_count": len(tmdb_rows),
@@ -619,6 +642,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("validate-config", help="Validate configuration and exit")
     sub.add_parser("makemkv-status", help="Check MakeMKV beta-key and build readiness")
+    sub.add_parser("notify-test", help="Send a test notification to the configured webhook")
 
     job = sub.add_parser("job", help="Job operations")
     job_sub = job.add_subparsers(dest="job_command")
@@ -842,6 +866,16 @@ def main() -> int:
         print("Configuration valid.")
         print(f"DB: {cfg.db_path}")
         print(f"Log: {cfg.log_path}")
+        return 0
+
+    if args.command == "notify-test":
+        result = send_notification(
+            cfg,
+            EVENT_TEST,
+            "Auto-Ripper test",
+            "Notifications are working. You will hear from Auto-Ripper when a job needs you, fails, or finishes.",
+        )
+        print(json.dumps(result, indent=2))
         return 0
 
     if args.command == "job":

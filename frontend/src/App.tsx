@@ -4,6 +4,7 @@ import {
   analyzeMenu,
   getReclaimableSpace,
   reclaimCompletedJobs,
+  sendTestNotification,
   setWindowTheme,
   autodetectRuntimeConfig,
   browseDirectoryPath,
@@ -246,6 +247,8 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null);
   // The cut picked on a multi-version disc, before it is confirmed.
   const [versionPick, setVersionPick] = useState<number | null>(null);
+  // What the last test notification reported, shown under the webhook field.
+  const [notifyTestResult, setNotifyTestResult] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"overview" | "activity" | "artifacts" | "json" | "settings">("overview");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -486,6 +489,21 @@ export default function App() {
       } else {
         setActiveTab("settings");
       }
+    });
+  }
+
+  async function testNotification() {
+    setNotifyTestResult(null);
+    await runAction("Testing notification", async () => {
+      // The backend reads the saved config, so save what is on screen first.
+      const next = await saveRuntimeConfig({
+        ...(configState?.config ?? {}),
+        ...coerceConfigDraft(configDraft),
+      });
+      setConfigState(next);
+      setConfigReady(next.validation.ok);
+      const result = await sendTestNotification();
+      setNotifyTestResult(result.sent ? `Sent. ${result.detail}` : `Not sent. ${result.detail}`);
     });
   }
 
@@ -941,7 +959,10 @@ export default function App() {
       .find((log) => log.to_status === stage || (log.from_status === null && log.to_status === null && log.message.includes(`Transitioned`) && log.message.endsWith(`-> ${stage}`)));
     return match?.timestamp ?? snapshot.job.updated_at ?? null;
   }, [snapshot]);
-  const reviewNeeded = Boolean(reviewState?.tmdb.needed || reviewState?.mapping.needed);
+  // An early TMDB question is an offer, not a stop: the job is still ripping.
+  const reviewNeeded = Boolean(
+    (reviewState?.tmdb.needed && !reviewState.tmdb.early) || reviewState?.mapping.needed,
+  );
   const ripReviewNeeded = Boolean(reviewState?.rip?.needed);
   const pipelineStages = snapshot ? getPipelineStages(snapshot.job.media_type) : TV_PIPELINE_STAGES;
 
@@ -2251,9 +2272,9 @@ export default function App() {
           </div>
         ) : null}
         {!showSettingsTab && reviewState?.tmdb.needed ? (
-          <div className="review-banner">
+          <div className={`review-banner${reviewState.tmdb.early ? " version-picker" : ""}`}>
             <div>
-              <strong>TMDB review needed</strong>
+              <strong>{reviewState.tmdb.early ? "Which movie is this?" : "TMDB review needed"}</strong>
               <p>{reviewState.tmdb.reason ?? "This job needs a manual TMDB selection before the pipeline can continue."}</p>
               {isMultiMovie ? (
                 <p>
@@ -2527,6 +2548,29 @@ export default function App() {
                         <small>
                           Every copy records a SHA-256 either way. Verifying reads the file back off the
                           NAS to compare it, which roughly doubles transfer time.
+                        </small>
+                      </label>
+                      <label>
+                        <span>Notification webhook URL</span>
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          placeholder="Leave empty for no notifications"
+                          value={configDraft.notify_webhook_url ?? ""}
+                          onChange={(e) => setConfigDraft((value) => ({ ...value, notify_webhook_url: e.target.value }))}
+                        />
+                        <button
+                          type="button"
+                          disabled={busyAction !== null || !(configDraft.notify_webhook_url ?? "").trim()}
+                          onClick={() => void testNotification()}
+                        >
+                          Save and send a test
+                        </button>
+                        <small>
+                          Auto-Ripper posts a short JSON message here when a job needs you, fails, or
+                          finishes — a Home Assistant webhook, ntfy, or anything else that accepts a
+                          POST. Treat the URL like a password: it is stored only in your local config.
+                          {notifyTestResult ? ` ${notifyTestResult}` : ""}
                         </small>
                       </label>
                     </div>

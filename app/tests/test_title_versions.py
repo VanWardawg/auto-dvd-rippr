@@ -171,7 +171,7 @@ class VersionChoiceTests(unittest.TestCase):
         job_id = self.job()
         with patch.object(pipeline, "recover_completed_rip", return_value=None), patch.object(
             pipeline, "_warn_if_nas_unreachable"
-        ), patch.object(pipeline, "execute_rip_job", side_effect=rip.TitleChoiceNeeded("pick")):
+        ), patch.object(pipeline, "_identify_movie_early"), patch.object(pipeline, "execute_rip_job", side_effect=rip.TitleChoiceNeeded("pick")):
             result = pipeline.run_pipeline_for_job(self.conn, self.cfg, job_id)
         self.assertEqual(result["status"], "ripping")
         self.assertEqual(get_job(self.conn, job_id)["status"], "ripping")

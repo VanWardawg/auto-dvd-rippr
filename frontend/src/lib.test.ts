@@ -252,6 +252,8 @@ describe("config draft coercion", () => {
 
   it("an absent config yields a usable empty draft rather than crashing", () => {
     expect(() => buildConfigDraft(null)).not.toThrow();
+    // Absent from an older config file, it must come back as an empty field.
+    expect(buildConfigDraft({}).notify_webhook_url).toBe("");
   });
 });
 

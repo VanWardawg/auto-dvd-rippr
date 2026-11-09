@@ -9,6 +9,7 @@ from .job_ops import purge_local_files
 from .joblock import JobAlreadyRunningError, job_run_lock
 from .logger import get_logger
 from .naming import NamingError, finalize_job_outputs
+from .notify import EVENT_FAILED, EVENT_FINISHED, EVENT_NEEDS_ATTENTION, send_notification
 from .rip import RipError, TitleChoiceNeeded, eject_drive, execute_rip_job, recover_completed_rip
 from .splitter import SplitError, execute_splits, plan_splits_for_job
 from .state import InvalidTransitionError, append_job_log, get_job, set_awaiting_review, transition_job
@@ -262,9 +263,12 @@ def _infer_resume_stage(conn, job) -> str:
 
 
 def run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = False) -> dict[str, Any]:
+    before = get_job(conn, job_id) or {}
     try:
         with job_run_lock(cfg.staging_root, job_id):
-            return _run_pipeline_for_job(conn, cfg, job_id, mock_rip=mock_rip)
+            result = _run_pipeline_for_job(conn, cfg, job_id, mock_rip=mock_rip)
+        _notify_outcome(conn, cfg, job_id, before, result)
+        return result
     except JobAlreadyRunningError:
         # Not an error for the job: the run that holds the lock is doing the
         # work. Recording it explains why Resume appeared to do nothing.
@@ -279,6 +283,138 @@ def run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = Fal
         conn.commit()
         job = get_job(conn, job_id)
         return {"status": str(job["status"]) if job else "unknown", "already_running": True}
+    except Exception:
+        _notify_failure(conn, cfg, job_id)
+        raise
+
+
+# What the job is waiting for, by the stage it stopped in.
+_ATTENTION_BY_STAGE = {
+    "ripping": "choose which version of the movie to rip",
+    "identifying": "confirm which title this disc is",
+    "mapping": "check which episodes are on this disc",
+    "splitting": "check where a combined episode should be split",
+}
+
+
+def _display_name(conn, job: dict[str, Any]) -> str:
+    """The identified title when there is one; the disc label until then."""
+    try:
+        row = conn.execute(
+            "SELECT title FROM job_selected_media WHERE job_id = ? LIMIT 1", (job.get("id"),)
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - a name is not worth failing over
+        row = None
+    if row and row["title"] and str(job.get("media_type") or "tv") == "movie":
+        return str(row["title"])
+    return str(job.get("disc_label") or "Disc")
+
+
+def _notify_outcome(conn, cfg: AppConfig, job_id: str, before: dict[str, Any], result: dict[str, Any]) -> None:
+    """
+    Report how a pipeline run ended, if a person would want to know.
+
+    Best effort throughout: a notification that cannot be sent, or a job row
+    that cannot be read, must not turn a finished run into a failed one.
+    """
+    try:
+        if result.get("superseded"):
+            return
+        job = get_job(conn, job_id) or {}
+        name = _display_name(conn, job)
+        status = str(result.get("status") or "")
+        if status == "done":
+            if str(before.get("status") or "") != "done":
+                send_notification(
+                    cfg, EVENT_FINISHED, "Auto-Ripper: finished", f"{name} is ripped and on the NAS.", job=job
+                )
+        elif status == "error":
+            _notify_failure(conn, cfg, job_id)
+        elif result.get("needs_review") and not before.get("awaiting_review"):
+            what = _ATTENTION_BY_STAGE.get(status, "review this job")
+            send_notification(
+                cfg, EVENT_NEEDS_ATTENTION, "Auto-Ripper needs you", f"{name}: {what}.", job=job
+            )
+    except Exception:  # noqa: BLE001 - deliberately swallowing
+        log.exception("could not send outcome notification", extra={"job_id": job_id})
+
+
+def _notify_failure(conn, cfg: AppConfig, job_id: str) -> None:
+    """Report a job that stopped in error. Never raises."""
+    try:
+        job = get_job(conn, job_id) or {}
+        reason = str(job.get("error_message") or "")
+        if str(job.get("status") or "") != "error" or "cancelled" in reason.lower():
+            # Stopping a job by hand is not news to the person who did it.
+            return
+        # The log path that follows is no use on a phone.
+        short = reason.split(" See log:")[0].strip() or "The job stopped with an error."
+        send_notification(
+            cfg, EVENT_FAILED, "Auto-Ripper: job failed", f"{_display_name(conn, job)}: {short[:400]}", job=job
+        )
+    except Exception:  # noqa: BLE001 - deliberately swallowing
+        log.exception("could not send failure notification", extra={"job_id": job_id})
+
+
+def _identify_movie_early(conn, cfg: AppConfig, job_id: str) -> None:
+    """
+    Find out which film this is as the rip starts, not an hour later.
+
+    Movies rip before they are identified, so a disc whose label TMDB cannot
+    place used to finish ripping and only then stop to ask -- by which time
+    whoever loaded it had walked away. Six of the first nineteen movies waited
+    this way, for 32 hours between them. Looking the label up first means the
+    question is on screen while the person is still standing at the drive.
+
+    This only ever asks early. The identify stage still runs after the rip,
+    with the ripped runtime to check against, and still has the final say; an
+    answer given now is simply there waiting for it. Best effort: no TMDB, no
+    early question, and the rip is never held up for it.
+    """
+    job = get_job(conn, job_id) or {}
+    if str(job.get("media_type") or "tv") != "movie" or str(job.get("movie_mode") or "single") != "single":
+        return
+    already_looked = conn.execute(
+        """
+        SELECT 1 FROM job_selected_media WHERE job_id = ?
+        UNION ALL
+        SELECT 1 FROM tmdb_candidates WHERE job_id = ?
+        LIMIT 1
+        """,
+        (job_id, job_id),
+    ).fetchone()
+    if already_looked:
+        return
+    try:
+        ident = identify_job_with_tmdb(conn, cfg, job_id)
+    except (TmdbError, OSError) as exc:
+        append_job_log(
+            conn,
+            job_id,
+            "INFO",
+            f"Could not look the film up before ripping ({exc}); it will be identified after the rip.",
+            None,
+            None,
+        )
+        conn.commit()
+        return
+    if ident.get("needs_review"):
+        append_job_log(
+            conn,
+            job_id,
+            "INFO",
+            "The film can be chosen now, while the disc rips; the rip does not wait for it.",
+            None,
+            None,
+        )
+        conn.commit()
+        send_notification(
+            cfg,
+            EVENT_NEEDS_ATTENTION,
+            "Auto-Ripper needs you",
+            f"{job.get('disc_label') or 'Disc'}: confirm which movie this is. It is ripping meanwhile.",
+            job=job,
+        )
 
 
 def _run_pipeline_for_job(conn, cfg: AppConfig, job_id: str, mock_rip: bool = False) -> dict[str, Any]:
@@ -688,6 +824,8 @@ def _execute_rip_and_advance(conn, cfg: AppConfig, job_id: str, *, mock_rip: boo
     recovered = recover_completed_rip(conn, cfg, job_id)
     if recovered is None:
         _warn_if_nas_unreachable(conn, cfg, job_id)
+        if not mock_rip:
+            _identify_movie_early(conn, cfg, job_id)
         job = get_job(conn, job_id)
         execute_rip_job(
             conn,

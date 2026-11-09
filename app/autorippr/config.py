@@ -113,6 +113,19 @@ class AppConfig:
     # collection and stopping every few discs to clear room by hand. Database
     # records are kept, so the NAS path and checksum survive the files.
     clear_local_after_transfer: bool = False
+    # Kill a rip that has neither advanced nor written anything for this long.
+    # A disc with an unreadable spot leaves MakeMKV re-reading the same sector
+    # indefinitely -- one rip sat at 49% for a day -- and nothing in the app
+    # said so. 0 turns the check off.
+    rip_stall_timeout_seconds: int = 900
+    # How many times to run a rip again, unasked, after it fails partway. Every
+    # one of the first 25 recorded rip failures was cured by pressing Resume;
+    # the cost was the 26 hours the jobs spent waiting for someone to press it.
+    rip_auto_retries: int = 1
+    # POST a small JSON document here when a job needs a person, fails, or
+    # finishes. Empty means no notifications. The URL is a secret: see
+    # notify.py.
+    notify_webhook_url: str = ""
 
 
 def load_config(config_path: str) -> AppConfig:
@@ -200,5 +213,8 @@ def load_config(config_path: str) -> AppConfig:
         eject_after_rip=_as_bool(merged.get("eject_after_rip"), False),
         verify_transfers=_as_bool(merged.get("verify_transfers"), False),
         clear_local_after_transfer=_as_bool(merged.get("clear_local_after_transfer"), False),
+        rip_stall_timeout_seconds=max(0, int(merged.get("rip_stall_timeout_seconds", 900))),
+        rip_auto_retries=max(0, int(merged.get("rip_auto_retries", 1))),
+        notify_webhook_url=str(merged.get("notify_webhook_url") or "").strip(),
     )
 

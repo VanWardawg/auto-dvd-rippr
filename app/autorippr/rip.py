@@ -2,10 +2,12 @@ import calendar
 import csv
 import json
 import platform
+import queue
 import re
 import sqlite3
 import shutil
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -102,6 +104,7 @@ def discover_optical_drives() -> list[dict[str, Any]]:
                 "root": root,
                 "has_media": has_media,
                 "volume_label": volume_name.value if has_media else "",
+                "volume_serial": int(serial.value) if has_media else 0,
             }
         )
     return results
@@ -258,43 +261,15 @@ def execute_rip_job(
                 to_status=None,
             )
             conn.commit()
-        append_job_log(
-            conn=conn,
-            job_id=job_id,
-            level="INFO",
-            message=f"Starting MakeMKV disc-info scan{f' for {optical_drive}' if optical_drive else ''}.",
-            from_status=None,
-            to_status=None,
-        )
-        conn.commit()
-        disc_info_text, disc_info_by_title = _read_makemkv_disc_info(
-            makemkv_path=cfg.makemkv_path,
-            source_spec=source_spec,
-            timeout_seconds=_disc_scan_timeout_seconds(cfg, optical_drive),
-            min_title_seconds=cfg.rip_min_title_seconds,
-        )
-        if disc_info_text:
-            (log_dir / "makemkv_disc_info.log").write_text(disc_info_text, encoding="utf-8")
-            append_job_log(
-                conn=conn,
-                job_id=job_id,
-                level="INFO",
-                message="Disc-info scan completed.",
-                from_status=None,
-                to_status=None,
-            )
+        scanned = _disc_info_for_rip(conn, cfg, job_id, source_spec, optical_drive, log_dir)
+        if scanned is None:
+            # The scan was skipped on purpose; "everything" is the plan, not a
+            # fallback worth a warning.
+            disc_info_by_title = {}
+            selection, title_alternates = None, {}
         else:
-            append_job_log(
-                conn=conn,
-                job_id=job_id,
-                level="WARNING",
-                message="Disc-info scan unavailable/timed out; continuing with rip.",
-                from_status=None,
-                to_status=None,
-            )
-        conn.commit()
-
-        selection, title_alternates = _plan_title_selection(conn, cfg, job_id, disc_info_by_title)
+            disc_info_by_title = scanned
+            selection, title_alternates = _plan_title_selection(conn, cfg, job_id, disc_info_by_title)
         _ensure_space_for_rip(conn, cfg, job_id, disc_info_by_title, selection)
 
         _ensure_job_still_ripping(conn, job_id)
@@ -307,9 +282,11 @@ def execute_rip_job(
             to_status=None,
         )
         conn.commit()
-        rip_log_text, exit_code = _run_makemkv_rip_streaming(
+        rip_log_text, exit_code = _rip_with_retries(
             conn=conn,
             job_id=job_id,
+            auto_retries=cfg.rip_auto_retries,
+            stall_timeout_seconds=cfg.rip_stall_timeout_seconds,
             makemkv_path=cfg.makemkv_path,
             output_dir=rip_output_dir,
             log_path=makemkv_log_path,
@@ -347,6 +324,8 @@ def execute_rip_job(
     if not mock:
         mismatches = _titles_not_matching_the_scan(titles, disc_info_by_title)
         if mismatches:
+            # The saved scan no longer describes what the drive returns.
+            _forget_disc_scan(log_dir)
             raise RipError(
                 "MakeMKV saved a different title than the disc scan found, so the rip was not used: "
                 + "; ".join(mismatches)
@@ -937,6 +916,307 @@ def _saved_disc_info(cfg: AppConfig, job_id: str) -> dict[int, dict[str, Any]]:
         return {}
 
 
+# A drive that has just been handed a disc often answers MakeMKV's first reads
+# with "Scsi error - MEDIUM ERROR:NO SEEK COMPLETE", and MakeMKV gives up with
+# "Failed to open disc". The same disc opens fine a minute later, which used to
+# mean the job sat in error until someone noticed and pressed Resume.
+DISC_OPEN_ATTEMPTS = 3
+DISC_OPEN_RETRY_DELAY_SECONDS = 30.0
+
+
+def _could_not_open_disc(makemkv_output: str) -> bool:
+    return "failed to open disc" in makemkv_output.lower()
+
+
+def _wait_for_drive(conn, job_id: str, seconds: float) -> None:
+    """Sleep between attempts without making the job uncancellable."""
+    deadline = time.monotonic() + seconds
+    while True:
+        _ensure_job_still_ripping(conn, job_id)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(1.0, remaining))
+
+
+def _log_open_retry(conn, job_id: str, what: str, attempt: int) -> None:
+    append_job_log(
+        conn=conn,
+        job_id=job_id,
+        level="WARNING",
+        message=(
+            f"MakeMKV could not open the disc for the {what} (attempt {attempt} of "
+            f"{DISC_OPEN_ATTEMPTS}); waiting {DISC_OPEN_RETRY_DELAY_SECONDS:.0f}s for the "
+            "drive to settle, then trying again."
+        ),
+        from_status=None,
+        to_status=None,
+    )
+    conn.commit()
+
+
+def _scan_disc_with_retries(
+    conn, cfg: AppConfig, job_id: str, source_spec: str, optical_drive: str | None
+) -> tuple[str, dict[int, dict[str, Any]]]:
+    """
+    The disc-info scan, retried while the drive fails to open the disc.
+
+    A scan that failed or timed out returns no text; one that ran but could not
+    open the disc returns MakeMKV's output with "Failed to open disc". Both are
+    retried. A scan that opened the disc and found nothing is an answer, not a
+    failure, and is returned at once.
+    """
+    for attempt in range(1, DISC_OPEN_ATTEMPTS + 1):
+        text, by_title = _read_makemkv_disc_info(
+            makemkv_path=cfg.makemkv_path,
+            source_spec=source_spec,
+            timeout_seconds=_disc_scan_timeout_seconds(cfg, optical_drive),
+            min_title_seconds=cfg.rip_min_title_seconds,
+        )
+        opened = bool(text) and not _could_not_open_disc(text)
+        if by_title or opened or attempt == DISC_OPEN_ATTEMPTS:
+            return text, by_title
+        _log_open_retry(conn, job_id, "disc scan", attempt)
+        _wait_for_drive(conn, job_id, DISC_OPEN_RETRY_DELAY_SECONDS)
+    return "", {}
+
+
+def _failure_is_permanent(log_text: str) -> bool:
+    """Failures another attempt cannot fix, so retrying only wastes the time."""
+    lowered = log_text.lower()
+    return (
+        "version is too old" in lowered
+        or "temporary key has expired" in lowered
+        or "no such file or directory" in lowered
+        or "access denied" in lowered
+    )
+
+
+def _rip_with_retries(
+    conn, job_id: str, output_dir: Path, *, auto_retries: int = 0, **kwargs
+) -> tuple[str, int]:
+    """
+    The rip, run again when another attempt is likely to succeed.
+
+    A drive that could not open the disc at all has read nothing, so trying
+    again is nearly free: up to DISC_OPEN_ATTEMPTS in total. A rip that failed
+    partway is started over `auto_retries` times -- that costs real time, but
+    every recorded mid-rip failure went on to succeed when someone pressed
+    Resume, and the wait for someone to press it was hours.
+
+    Not retried: a stalled rip (the same unreadable spot will stall it again),
+    and failures no second attempt can fix, such as an expired key.
+    """
+    open_failures = 0
+    other_failures = 0
+    while True:
+        log_text, exit_code = _run_makemkv_rip_streaming(
+            conn=conn, job_id=job_id, output_dir=output_dir, **kwargs
+        )
+        if exit_code == 0:
+            return log_text, exit_code
+
+        if _could_not_open_disc(log_text) and not any(output_dir.glob("*.mkv")):
+            open_failures += 1
+            if open_failures >= DISC_OPEN_ATTEMPTS:
+                return log_text, exit_code
+            _log_open_retry(conn, job_id, "rip", open_failures)
+        else:
+            if (
+                other_failures >= auto_retries
+                or STALL_NOTE in log_text
+                or _failure_is_permanent(log_text)
+            ):
+                return log_text, exit_code
+            other_failures += 1
+            append_job_log(
+                conn=conn,
+                job_id=job_id,
+                level="WARNING",
+                message=(
+                    f"The rip failed partway (MakeMKV exit code {exit_code}); starting it again "
+                    f"automatically (retry {other_failures} of {auto_retries}). "
+                    "The failed attempt's log is kept next to makemkv.log."
+                ),
+                from_status=None,
+                to_status=None,
+            )
+            conn.commit()
+            _clear_stale_rip_output(output_dir)
+        _wait_for_drive(conn, job_id, DISC_OPEN_RETRY_DELAY_SECONDS)
+
+
+# ---- the disc scan: skipped when it buys nothing, reused when still valid
+
+DISC_SCAN_RECORD = "disc_scan.json"
+
+
+def _disc_info_for_rip(
+    conn, cfg: AppConfig, job_id: str, source_spec: str, optical_drive: str | None, log_dir: Path
+) -> dict[int, dict[str, Any]] | None:
+    """
+    What the disc holds, by title. None means the scan was deliberately skipped.
+
+    The scan is not free. MakeMKV opens and analyses the disc for `info`, and
+    then does it all again for `mkv` -- twenty seconds each on an ordinary
+    disc, but five minutes each on the copy-protected DVDs that make up most
+    of a TV collection. So it is skipped where its answer would not change
+    anything, and reused where it has already been given.
+    """
+    job = get_job(conn, job_id) or {}
+    if _separate_scan_is_wasted(job, optical_drive):
+        append_job_log(
+            conn=conn,
+            job_id=job_id,
+            level="INFO",
+            message=(
+                "Skipping the separate disc scan: this is a single-episode DVD, so every "
+                "title is ripped and the longest one becomes the episode."
+            ),
+            from_status=None,
+            to_status=None,
+        )
+        conn.commit()
+        return None
+
+    disc = _disc_identity(optical_drive)
+    reused = _reusable_disc_scan(cfg, log_dir, disc)
+    if reused:
+        append_job_log(
+            conn=conn,
+            job_id=job_id,
+            level="INFO",
+            message="Reusing the disc scan from the previous attempt: the same disc is still in the drive.",
+            from_status=None,
+            to_status=None,
+        )
+        conn.commit()
+        return reused
+
+    append_job_log(
+        conn=conn,
+        job_id=job_id,
+        level="INFO",
+        message=f"Starting MakeMKV disc-info scan{f' for {optical_drive}' if optical_drive else ''}.",
+        from_status=None,
+        to_status=None,
+    )
+    conn.commit()
+    disc_info_text, disc_info_by_title = _scan_disc_with_retries(
+        conn, cfg, job_id, source_spec, optical_drive
+    )
+    if disc_info_text:
+        disc_info_log = log_dir / "makemkv_disc_info.log"
+        disc_info_log.write_text(disc_info_text, encoding="utf-8")
+        if _could_not_open_disc(disc_info_text):
+            # Ripping "all" next would fail the same way, after another
+            # few minutes of the drive grinding.
+            raise RipError(_describe_makemkv_failure(disc_info_text, disc_info_log))
+        append_job_log(
+            conn=conn,
+            job_id=job_id,
+            level="INFO",
+            message="Disc-info scan completed.",
+            from_status=None,
+            to_status=None,
+        )
+        if disc_info_by_title:
+            _remember_disc_scan(cfg, log_dir, disc)
+    else:
+        append_job_log(
+            conn=conn,
+            job_id=job_id,
+            level="WARNING",
+            message="Disc-info scan unavailable/timed out; continuing with rip.",
+            from_status=None,
+            to_status=None,
+        )
+    conn.commit()
+    return disc_info_by_title
+
+
+def _separate_scan_is_wasted(job: dict[str, Any], optical_drive: str | None) -> bool:
+    """
+    Whether this job would rip the same thing whatever the scan said.
+
+    A single-episode TV disc where the episode was chosen up front maps its
+    longest title to that episode; nothing reads the scan. Limited to DVDs,
+    where ripping the few short extras alongside costs megabytes -- on a
+    Blu-ray "everything" can be tens of gigabytes, and the scan is quick.
+    """
+    if str(job.get("media_type") or "tv") != "tv":
+        return False
+    if str(job.get("disc_scope") or "") != "single_episode" or job.get("episode_range_start") is None:
+        return False
+    letter = (optical_drive or "").strip().rstrip("\\/")
+    if not letter:
+        return False
+    try:
+        return Path(f"{letter}\\VIDEO_TS").is_dir()
+    except OSError:
+        return False
+
+
+def _disc_identity(optical_drive: str | None) -> dict[str, Any] | None:
+    """The loaded disc's volume serial and label, or None if it cannot be told."""
+    normalized = (optical_drive or "").strip().upper()
+    if not normalized:
+        return None
+    try:
+        drives = discover_optical_drives()
+    except OSError:
+        return None
+    match = next((d for d in drives if str(d.get("drive", "")).upper() == normalized), None)
+    if not match or not match.get("has_media") or not match.get("volume_serial"):
+        return None
+    return {
+        "volume_serial": int(match["volume_serial"]),
+        "volume_label": str(match.get("volume_label") or ""),
+    }
+
+
+def _remember_disc_scan(cfg: AppConfig, log_dir: Path, disc: dict[str, Any] | None) -> None:
+    if not disc:
+        return
+    record = dict(disc, min_title_seconds=int(cfg.rip_min_title_seconds))
+    try:
+        (log_dir / DISC_SCAN_RECORD).write_text(json.dumps(record), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _forget_disc_scan(log_dir: Path) -> None:
+    try:
+        (log_dir / DISC_SCAN_RECORD).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _reusable_disc_scan(
+    cfg: AppConfig, log_dir: Path, disc: dict[str, Any] | None
+) -> dict[int, dict[str, Any]] | None:
+    """
+    The previous attempt's scan, if it still describes the disc in the drive.
+
+    Every Resume used to scan again: 62 scans for 36 discs. The disc is known
+    to be the same one by its volume serial and label, and the title numbers
+    are only comparable under the same --minlength, so all three must match.
+    """
+    if not disc:
+        return None
+    try:
+        record = json.loads((log_dir / DISC_SCAN_RECORD).read_text(encoding="utf-8"))
+        saved_text = (log_dir / "makemkv_disc_info.log").read_text(encoding="utf-8", errors="replace")
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    expected = dict(disc, min_title_seconds=int(cfg.rip_min_title_seconds))
+    if any(record.get(key) != value for key, value in expected.items()):
+        return None
+    return _parse_makemkv_info_output(saved_text) or None
+
+
 def _disc_scan_timeout_seconds(cfg: AppConfig, optical_drive: str | None) -> int:
     """
     How long to allow the pre-rip disc scan.
@@ -961,6 +1241,7 @@ def _run_makemkv_rip_streaming(
     title_ids: list[int] | None = None,
     title_alternates: dict[int, list[int]] | None = None,
     min_title_seconds: int = 120,
+    stall_timeout_seconds: float = 0.0,
 ) -> tuple[str, int]:
     makemkv = _resolve_makemkv_cli_path(makemkv_path)
     if not makemkv.exists():
@@ -975,6 +1256,7 @@ def _run_makemkv_rip_streaming(
     start = time.monotonic()
     exit_code = 0
 
+    _archive_attempt_log(log_path)
     with open(log_path, "w", encoding="utf-8") as lf:
         for index, selector in enumerate(selectors, start=1):
             _ensure_job_still_ripping(conn, job_id)
@@ -1003,6 +1285,7 @@ def _run_makemkv_rip_streaming(
                 timeout_seconds=timeout_seconds,
                 title_index=index,
                 title_count=len(selectors),
+                stall_timeout_seconds=stall_timeout_seconds,
             )
             lf.write(f"\nEXIT_CODE: {exit_code}\n")
             lf.flush()
@@ -1033,6 +1316,7 @@ def _run_makemkv_rip_streaming(
                     selector=selector,
                     alternates=(title_alternates or {}).get(_selector_title_id(selector), []),
                     keep=before,
+                    stall_timeout_seconds=stall_timeout_seconds,
                 )
             if exit_code != 0:
                 break
@@ -1049,6 +1333,37 @@ def _run_makemkv_rip_streaming(
 
 # MakeMKV has no distinct exit code for "I saved nothing", so we supply one.
 MAKEMKV_SAVED_NOTHING = -2
+# ...nor for "we stopped it because it was going nowhere".
+MAKEMKV_STALLED = -3
+# Written to the MakeMKV log when the watchdog stops a rip. The failure
+# message and the retry logic both recognise a stall by it.
+STALL_NOTE = "NOTE: no progress for"
+
+# Earlier attempts are kept as makemkv.attempt-N.log. The log used to be
+# overwritten by every attempt, so by the time anyone asked why a rip had
+# failed, the only log left was the one from the attempt that worked.
+ATTEMPT_LOGS_KEPT = 5
+
+
+def _archive_attempt_log(log_path: Path) -> None:
+    """Move the previous attempt's log aside instead of overwriting it."""
+    try:
+        if not log_path.exists() or log_path.stat().st_size == 0:
+            return
+        pattern = f"{log_path.stem}.attempt-*{log_path.suffix}"
+        numbers = []
+        for old in log_path.parent.glob(pattern):
+            match = re.search(r"\.attempt-(\d+)$", old.stem)
+            if match:
+                numbers.append((int(match.group(1)), old))
+        numbers.sort()
+        next_number = numbers[-1][0] + 1 if numbers else 1
+        log_path.replace(log_path.with_name(f"{log_path.stem}.attempt-{next_number}{log_path.suffix}"))
+        for _, old in numbers[: max(0, len(numbers) + 1 - ATTEMPT_LOGS_KEPT)]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        # Keeping history is a courtesy; it must not stop the rip.
+        log.warning("could not archive previous makemkv log", extra={"path": str(log_path)})
 
 
 def _new_outputs(output_dir: Path, before: set[str]) -> set[str]:
@@ -1094,6 +1409,7 @@ def _retry_title_with_alternates(
     selector: str,
     alternates: list[int],
     keep: set[str],
+    stall_timeout_seconds: float = 0.0,
 ) -> int:
     """
     Re-run a failed title against the same-length copies it was chosen over.
@@ -1140,6 +1456,7 @@ def _retry_title_with_alternates(
             timeout_seconds=timeout_seconds,
             title_index=title_index,
             title_count=title_count,
+            stall_timeout_seconds=stall_timeout_seconds,
         )
         log_file.write(f"\nEXIT_CODE: {exit_code}\n")
         log_file.flush()
@@ -1173,6 +1490,7 @@ def _stream_one_makemkv_rip(
     timeout_seconds: int,
     title_index: int,
     title_count: int,
+    stall_timeout_seconds: float = 0.0,
 ) -> int:
     """
     Run one MakeMKV command, teeing its robot output to the log while turning
@@ -1182,6 +1500,12 @@ def _stream_one_makemkv_rip(
     operation it is performing (PRGC). Reading it is both more accurate and
     more responsive than the previous approach of measuring the output
     directory's size every 15 seconds.
+
+    Output is read on a helper thread so this loop wakes once a second whether
+    or not MakeMKV has anything to say. Reading it inline meant a silent
+    MakeMKV blocked the loop, and with it the cancel check, the overall
+    timeout and the stall watchdog -- all of which matter most exactly when
+    MakeMKV has gone quiet.
     """
     try:
         proc = subprocess.Popen(
@@ -1196,24 +1520,52 @@ def _stream_one_makemkv_rip(
     except OSError as exc:
         raise RipError(f"Failed to execute MakeMKV: {exc}") from exc
 
+    assert proc.stdout is not None
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def pump() -> None:
+        try:
+            for raw in proc.stdout:
+                lines.put(raw)
+        except (OSError, ValueError):
+            pass
+        finally:
+            lines.put(None)
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+
     operation = ""
     fraction = 0.0
     next_flush = 0.0
     last_size_mb = 0.0
     last_size_at = time.monotonic()
     rate_mb_s: float | None = None
+    # The stall clock. Before anything is written, MakeMKV's own progress is
+    # the only sign of life; once the file is growing, only growth counts --
+    # a drive grinding on a bad sector still nudges the progress counter every
+    # few minutes while writing nothing at all.
+    last_advance_at = time.monotonic()
+    advance_fraction = 0.0
+    stalled = False
 
     try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            log_file.write(line)
+        while True:
+            try:
+                line = lines.get(timeout=1.0)
+            except queue.Empty:
+                line = ""
+            if line is None:
+                break
+            if line:
+                log_file.write(line)
 
             now = time.monotonic()
             if now - started_at > timeout_seconds:
                 proc.kill()
                 raise RipError(f"MakeMKV timed out after {timeout_seconds}s.")
 
-            event = parse_progress_line(line)
+            event = parse_progress_line(line) if line else None
             if event is not None:
                 if event.kind == "current_op" and event.text:
                     operation = event.text
@@ -1239,6 +1591,20 @@ def _stream_one_makemkv_rip(
                 rate_mb_s = (size_mb - last_size_mb) / elapsed_since
                 last_size_mb = size_mb
                 last_size_at = now
+                last_advance_at = now
+            elif last_size_mb <= 0 and fraction != advance_fraction:
+                advance_fraction = fraction
+                last_advance_at = now
+
+            if stall_timeout_seconds > 0 and now - last_advance_at > stall_timeout_seconds:
+                log_file.write(
+                    f"\n{STALL_NOTE} {int(now - last_advance_at)}s "
+                    f"({last_size_mb:,.0f} MB written); MakeMKV was stopped.\n"
+                )
+                log_file.flush()
+                proc.kill()
+                stalled = True
+                break
 
             elapsed = now - started_at
             eta_seconds = None
@@ -1294,10 +1660,15 @@ def _stream_one_makemkv_rip(
                 except sqlite3.Error:
                     pass
     finally:
+        # Every exit above either saw MakeMKV close its output or killed it,
+        # so the reader is about to finish; wait for it before closing the
+        # pipe underneath it.
+        reader.join(timeout=5.0)
         if proc.stdout is not None:
             proc.stdout.close()
 
-    return int(proc.wait() or 0)
+    exit_code = int(proc.wait() or 0)
+    return MAKEMKV_STALLED if stalled else exit_code
 
 
 def _output_size_mb(output_dir: Path) -> float:
@@ -1329,6 +1700,22 @@ def _describe_makemkv_failure(log_text: str, log_path: Path) -> str:
         return (
             "MakeMKV cannot rip because its beta key expired or the installed version is too old. "
             f"Update MakeMKV or enter a valid registration key, then retry. See log: {log_path}"
+        )
+
+    stall = re.search(re.escape(STALL_NOTE.lower()) + r" (\d+)s \(([\d,]+) mb written\)", lowered)
+    if stall:
+        minutes = max(1, round(int(stall.group(1)) / 60))
+        read_errors = lowered.count("medium error") + lowered.count("status_device_data_error")
+        cause = (
+            f"MakeMKV logged {read_errors} read errors, so the disc has a spot this drive cannot read"
+            if read_errors
+            else "MakeMKV reported no read errors, so the drive itself may have stopped responding"
+        )
+        return (
+            f"The rip made no progress for {minutes} minutes and was stopped after writing "
+            f"{stall.group(2)} MB. {cause}. Clean the disc, wiping from the centre straight "
+            "outward, and retry; if it stops at the same point again, try another drive or have "
+            f"the disc resurfaced. See log: {log_path}"
         )
 
     if "failed to open disc" in lowered:
