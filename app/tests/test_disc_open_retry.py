@@ -74,7 +74,7 @@ class DiscOpenRetryTests(unittest.TestCase):
         _, calls = self.scan(("TCOUNT:0\n", {}))
         self.assertEqual(calls, 1)
 
-    def rip_attempts(self, *results, leave_file=False, auto_retries=0):
+    def rip_attempts(self, *results, leave_file=False, auto_retries=0, drive_retries=2):
         out = self.root / "rip_output"
         out.mkdir(exist_ok=True)
 
@@ -85,10 +85,18 @@ class DiscOpenRetryTests(unittest.TestCase):
                 (out / "title_t00.mkv").write_bytes(b"x")
             return remaining.pop(0)
 
-        with patch.object(rip, "_run_makemkv_rip_streaming", side_effect=fake_rip) as run:
+        with patch.object(rip, "_run_makemkv_rip_streaming", side_effect=fake_rip) as run, patch.object(
+            rip, "_wait_for_disc"
+        ) as wait:
             outcome = rip._rip_with_retries(
-                conn=self.conn, job_id=self.job_id, output_dir=out, auto_retries=auto_retries
+                conn=self.conn,
+                job_id=self.job_id,
+                output_dir=out,
+                auto_retries=auto_retries,
+                drive_retries=drive_retries,
+                drive_retry_seconds=120.0,
             )
+        self.waits = [call.args[4] for call in wait.call_args_list]
         return outcome, run.call_count
 
     def test_rip_retries_an_open_failure(self) -> None:
@@ -104,6 +112,79 @@ class DiscOpenRetryTests(unittest.TestCase):
         self.assertEqual((exit_code, calls), (11, 1))
 
     READ_ERRORS = "Encountered 11 errors of type 'Read Error'"
+    # Captain America: Civil War, 27 minutes into its second attempt.
+    DROPPED_OUT = (
+        "MSG:2003,0,3,\"Error 'Scsi error - NOT READY:MEDIUM NOT PRESENT - TRAY OPEN' occurred while "
+        "reading '/BDMV/STREAM/00300.m2ts' at offset '15136063488'\"\n"
+        'MSG:5037,516,2,"Copy complete. 0 titles saved, 1 failed."\n'
+    )
+
+    def test_a_drive_that_lost_the_disc_is_retried_past_the_ordinary_limit(self) -> None:
+        # One early dropout used to spend the only retry there was.
+        (_, exit_code), calls = self.rip_attempts(
+            (self.DROPPED_OUT, rip.MAKEMKV_SAVED_NOTHING),
+            (self.DROPPED_OUT, rip.MAKEMKV_SAVED_NOTHING),
+            ("saved", 0),
+            auto_retries=1,
+            drive_retries=8,
+        )
+        self.assertEqual((exit_code, calls), (0, 3))
+
+    def test_each_drive_retry_waits_longer_up_to_a_ceiling(self) -> None:
+        self.rip_attempts(*[(self.DROPPED_OUT, 1)] * 7, drive_retries=6)
+        self.assertEqual(self.waits, [120.0, 240.0, 480.0, 960.0, 1800.0, 1800.0])
+
+    def test_drive_retries_are_limited(self) -> None:
+        (_, exit_code), calls = self.rip_attempts(*[(self.DROPPED_OUT, 1)] * 3, auto_retries=5, drive_retries=2)
+        self.assertEqual((exit_code, calls), (1, 3))
+
+    def test_the_failure_names_the_drive_not_the_disc(self) -> None:
+        message = rip._describe_makemkv_failure(self.DROPPED_OUT, Path("makemkv.log"))
+        self.assertIn("drive stopped seeing the disc", message)
+        self.assertNotIn("damaged", message)
+
+    def wait_for_disc(self, *presences, delay=0.0):
+        disc = {"volume_serial": 1, "volume_label": "CIVIL_WAR"}
+        with patch.object(rip, "DRIVE_POLL_SECONDS", 0), patch.object(
+            rip, "_disc_presence", side_effect=list(presences)
+        ) as presence:
+            rip._wait_for_disc(self.conn, self.job_id, "D:", disc, delay)
+        return presence.call_count
+
+    def test_an_open_tray_is_waited_out(self) -> None:
+        self.assertEqual(self.wait_for_disc("absent", "absent", "same"), 3)
+
+    def test_a_different_disc_stops_the_retries(self) -> None:
+        with self.assertRaises(rip.RipError) as raised:
+            self.wait_for_disc("absent", "different")
+        self.assertIn("different disc", str(raised.exception))
+
+    def test_a_disc_that_never_comes_back_is_given_up_on(self) -> None:
+        with patch.object(rip, "DRIVE_WAIT_FOR_DISC_SECONDS", 0), self.assertRaises(rip.RipError) as raised:
+            self.wait_for_disc("absent", "absent", "absent")
+        self.assertIn("has not shown it again", str(raised.exception))
+
+    def test_the_wait_can_be_cancelled(self) -> None:
+        transition_job(self.conn, self.job_id, "error")
+        with self.assertRaises(rip.RipError):
+            self.wait_for_disc("absent", delay=600.0)
+
+    def test_the_wait_shows_as_a_wait(self) -> None:
+        self.wait_for_disc("same")
+        row = self.conn.execute("SELECT kind, detail FROM job_progress WHERE job_id = ?", (self.job_id,)).fetchone()
+        self.assertEqual(row["kind"], "waiting")
+
+    def presence(self, drives, disc={"volume_serial": 1, "volume_label": "CIVIL_WAR"}):
+        with patch.object(rip, "discover_optical_drives", return_value=drives):
+            return rip._disc_presence("D:", disc)
+
+    def test_the_disc_is_recognised_by_serial_and_label(self) -> None:
+        drive = {"drive": "D:", "has_media": True, "volume_serial": 1, "volume_label": "CIVIL_WAR"}
+        self.assertEqual(self.presence([drive]), "same")
+        self.assertEqual(self.presence([dict(drive, volume_serial=2, volume_label="WONKA")]), "different")
+        self.assertEqual(self.presence([dict(drive, has_media=False)]), "absent")
+        # The whole drive dropping off USB is the same fault, not a reason to stop.
+        self.assertEqual(self.presence([{"drive": "E:", "has_media": True}]), "absent")
 
     def test_a_rip_that_failed_partway_is_started_again(self) -> None:
         (_, exit_code), calls = self.rip_attempts((self.READ_ERRORS, 1), ("saved", 0), auto_retries=1)

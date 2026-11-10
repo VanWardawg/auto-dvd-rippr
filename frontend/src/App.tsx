@@ -2551,6 +2551,58 @@ export default function App() {
                         </small>
                       </label>
                       <label>
+                        <span>Retries when the drive loses the disc</span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={configDraft.rip_drive_retries ?? "8"}
+                          onChange={(e) => setConfigDraft((value) => ({ ...value, rip_drive_retries: e.target.value }))}
+                        />
+                        <small>
+                          How many times to start the rip again when the drive could not open the disc or stopped
+                          seeing it partway. It keeps waiting while the same disc is in the drive or the
+                          drive shows none, and stops if a different disc goes in. 0 turns this off.
+                        </small>
+                      </label>
+                      <label>
+                        <span>First drive retry after (minutes)</span>
+                        <input
+                          type="number"
+                          min={1}
+                          value={configDraft.rip_drive_retry_minutes ?? "2"}
+                          onChange={(e) => setConfigDraft((value) => ({ ...value, rip_drive_retry_minutes: e.target.value }))}
+                        />
+                        <small>
+                          Each later retry waits twice as long as the one before, up to 30 minutes.
+                        </small>
+                      </label>
+                      <label>
+                        <span>Retries for other rip failures</span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={configDraft.rip_auto_retries ?? "1"}
+                          onChange={(e) => setConfigDraft((value) => ({ ...value, rip_auto_retries: e.target.value }))}
+                        />
+                        <small>
+                          How many times to start over when a rip fails partway for another reason, such as read
+                          errors. Each retry rips the disc from the beginning.
+                        </small>
+                      </label>
+                      <label>
+                        <span>Stop a stalled rip after (minutes)</span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={configDraft.rip_stall_timeout_minutes ?? "15"}
+                          onChange={(e) => setConfigDraft((value) => ({ ...value, rip_stall_timeout_minutes: e.target.value }))}
+                        />
+                        <small>
+                          A rip that writes nothing for this long is stopped and reported as an unreadable spot
+                          on the disc. 0 lets it run indefinitely.
+                        </small>
+                      </label>
+                      <label>
                         <span>Notification webhook URL</span>
                         <input
                           type="password"

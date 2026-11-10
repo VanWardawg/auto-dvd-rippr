@@ -255,6 +255,17 @@ describe("config draft coercion", () => {
     // Absent from an older config file, it must come back as an empty field.
     expect(buildConfigDraft({}).notify_webhook_url).toBe("");
   });
+
+  it("saves the retry settings as numbers, and the stall limit in seconds", () => {
+    const draft = buildConfigDraft({ rip_drive_retries: 5, rip_stall_timeout_seconds: 1200 });
+    expect(draft.rip_stall_timeout_minutes).toBe("20");
+    const saved = coerceConfigDraft({ ...draft, rip_drive_retry_minutes: "10", rip_auto_retries: "" });
+    expect(saved.rip_drive_retries).toBe(5);
+    expect(saved.rip_drive_retry_minutes).toBe(10);
+    expect(saved.rip_auto_retries).toBe(1);
+    expect(saved.rip_stall_timeout_seconds).toBe(1200);
+    expect("rip_stall_timeout_minutes" in saved).toBe(false);
+  });
 });
 
 describe("display helpers", () => {

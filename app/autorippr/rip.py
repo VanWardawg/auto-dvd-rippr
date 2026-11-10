@@ -286,6 +286,9 @@ def execute_rip_job(
             conn=conn,
             job_id=job_id,
             auto_retries=cfg.rip_auto_retries,
+            drive_retries=cfg.rip_drive_retries,
+            drive_retry_seconds=cfg.rip_drive_retry_minutes * 60.0,
+            optical_drive=optical_drive,
             stall_timeout_seconds=cfg.rip_stall_timeout_seconds,
             makemkv_path=cfg.makemkv_path,
             output_dir=rip_output_dir,
@@ -992,22 +995,136 @@ def _failure_is_permanent(log_text: str) -> bool:
     )
 
 
+def _drive_lost_the_disc(log_text: str) -> bool:
+    """
+    Whether the drive stopped seeing the disc, as opposed to failing to read it.
+
+    "MEDIUM NOT PRESENT - TRAY OPEN" on a disc that is sitting in a closed
+    drive, and Windows' matching "There is no disk in the drive", mean the
+    drive or its connection dropped out. The disc is fine.
+    """
+    lowered = log_text.lower()
+    return "medium not present" in lowered or "there is no disk in the drive" in lowered
+
+
+# Each drive retry waits twice as long as the one before, up to this.
+DRIVE_RETRY_MAX_DELAY_SECONDS = 1800.0
+# Once a retry is due, how long to go on waiting for the drive to show the
+# disc again before giving up. A job waiting here holds the drive, so it must
+# not wait for ever on a disc somebody took out and walked off with.
+DRIVE_WAIT_FOR_DISC_SECONDS = 3600.0
+DRIVE_POLL_SECONDS = 15.0
+
+
+def _disc_presence(optical_drive: str | None, disc: dict[str, Any] | None) -> str:
+    """
+    What the drive holds now, against the disc the rip started with:
+    "same", "absent" (no disc, tray open, or the drive itself gone),
+    "different", or "unknown" when the drive cannot be asked.
+    """
+    normalized = (optical_drive or "").strip().upper()
+    if not normalized:
+        return "unknown"
+    try:
+        drives = discover_optical_drives()
+    except OSError:
+        return "unknown"
+    if not drives:
+        # Not Windows, or enumeration failed outright.
+        return "unknown"
+    match = next((d for d in drives if str(d.get("drive", "")).upper() == normalized), None)
+    if not match or not match.get("has_media"):
+        return "absent"
+    if not disc:
+        return "same"
+    same = int(match.get("volume_serial") or 0) == int(disc.get("volume_serial") or 0) and str(
+        match.get("volume_label") or ""
+    ) == str(disc.get("volume_label") or "")
+    return "same" if same else "different"
+
+
+def _wait_for_disc(
+    conn, job_id: str, optical_drive: str | None, disc: dict[str, Any] | None, delay_seconds: float
+) -> None:
+    """
+    Sit out the back-off, then return once the drive shows the same disc.
+
+    A drive reporting the tray open or no disc is waited on -- that is the
+    fault being ridden out. A different disc is not: the rip is abandoned
+    rather than run against whatever was put in. Cancellable throughout, and
+    it keeps the progress row beating so the UI shows a wait, not a dead job.
+    """
+    started = time.monotonic()
+    retry_at = started + delay_seconds
+    give_up_at = retry_at + DRIVE_WAIT_FOR_DISC_SECONDS
+    next_poll = started
+    presence = "unknown"
+    where = optical_drive or "the drive"
+    while True:
+        _ensure_job_still_ripping(conn, job_id)
+        now = time.monotonic()
+        if now >= next_poll:
+            next_poll = now + DRIVE_POLL_SECONDS
+            presence = _disc_presence(optical_drive, disc)
+            if presence == "different":
+                raise RipError(
+                    f"The drive lost the disc partway through the rip, and a different disc is now in "
+                    f"{where}, so the rip was not retried. Put the original disc back and press Resume."
+                )
+            if now < retry_at:
+                detail = f"The drive lost the disc; trying again in {max(1, round((retry_at - now) / 60))} min"
+            else:
+                detail = f"Waiting for {where} to show the disc again"
+            try:
+                upsert_progress(conn, job_id, stage="ripping", kind="waiting", detail=detail)
+                conn.execute("UPDATE jobs SET updated_at = ? WHERE id = ?", (now_iso(), job_id))
+                conn.commit()
+            except sqlite3.Error:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+        if now >= retry_at and presence in ("same", "unknown"):
+            return
+        if now >= give_up_at:
+            raise RipError(
+                f"The drive lost the disc partway through the rip and {where} has not shown it again for "
+                f"{round(DRIVE_WAIT_FOR_DISC_SECONDS / 60)} minutes. Check the drive's cable and power, "
+                "reseat the disc, and press Resume."
+            )
+        time.sleep(min(1.0, DRIVE_POLL_SECONDS))
+
+
 def _rip_with_retries(
-    conn, job_id: str, output_dir: Path, *, auto_retries: int = 0, **kwargs
+    conn,
+    job_id: str,
+    output_dir: Path,
+    *,
+    auto_retries: int = 0,
+    drive_retries: int = 0,
+    drive_retry_seconds: float = 120.0,
+    optical_drive: str | None = None,
+    **kwargs,
 ) -> tuple[str, int]:
     """
     The rip, run again when another attempt is likely to succeed.
 
-    A drive that could not open the disc at all has read nothing, so trying
-    again is nearly free: up to DISC_OPEN_ATTEMPTS in total. A rip that failed
-    partway is started over `auto_retries` times -- that costs real time, but
-    every recorded mid-rip failure went on to succeed when someone pressed
-    Resume, and the wait for someone to press it was hours.
+    Two budgets, because there are two kinds of failure worth retrying:
+
+    Drive trouble -- the drive could not open the disc, or stopped seeing it
+    partway ("MEDIUM NOT PRESENT - TRAY OPEN"). Nothing is wrong with the
+    disc, so these are retried `drive_retries` times with a growing wait, for
+    as long as the same disc is in the drive or the drive shows none at all.
+    One early dropout used to spend the only retry there was, leaving nothing
+    for the dropout 27 minutes into the second attempt.
+
+    Anything else that failed partway is started over `auto_retries` times.
 
     Not retried: a stalled rip (the same unreadable spot will stall it again),
     and failures no second attempt can fix, such as an expired key.
     """
-    open_failures = 0
+    disc = _disc_identity(optical_drive)
+    drive_failures = 0
     other_failures = 0
     while True:
         log_text, exit_code = _run_makemkv_rip_streaming(
@@ -1016,33 +1133,51 @@ def _rip_with_retries(
         if exit_code == 0:
             return log_text, exit_code
 
-        if _could_not_open_disc(log_text) and not any(output_dir.glob("*.mkv")):
-            open_failures += 1
-            if open_failures >= DISC_OPEN_ATTEMPTS:
+        could_not_open = _could_not_open_disc(log_text) and not any(output_dir.glob("*.mkv"))
+        if could_not_open or _drive_lost_the_disc(log_text):
+            if drive_failures >= drive_retries:
                 return log_text, exit_code
-            _log_open_retry(conn, job_id, "rip", open_failures)
-        else:
-            if (
-                other_failures >= auto_retries
-                or STALL_NOTE in log_text
-                or _failure_is_permanent(log_text)
-            ):
-                return log_text, exit_code
-            other_failures += 1
+            drive_failures += 1
+            delay = min(drive_retry_seconds * 2 ** (drive_failures - 1), DRIVE_RETRY_MAX_DELAY_SECONDS)
             append_job_log(
                 conn=conn,
                 job_id=job_id,
                 level="WARNING",
                 message=(
-                    f"The rip failed partway (MakeMKV exit code {exit_code}); starting it again "
-                    f"automatically (retry {other_failures} of {auto_retries}). "
-                    "The failed attempt's log is kept next to makemkv.log."
+                    ("The drive could not open the disc" if could_not_open else "The drive lost the disc partway through the rip")
+                    + f"; trying again in {max(1, round(delay / 60))} min "
+                    f"(drive retry {drive_failures} of {drive_retries}). "
+                    "The rip starts over, and waits as long as the same disc is in the drive."
                 ),
                 from_status=None,
                 to_status=None,
             )
             conn.commit()
             _clear_stale_rip_output(output_dir)
+            _wait_for_disc(conn, job_id, optical_drive, disc, delay)
+            continue
+
+        if (
+            other_failures >= auto_retries
+            or STALL_NOTE in log_text
+            or _failure_is_permanent(log_text)
+        ):
+            return log_text, exit_code
+        other_failures += 1
+        append_job_log(
+            conn=conn,
+            job_id=job_id,
+            level="WARNING",
+            message=(
+                f"The rip failed partway (MakeMKV exit code {exit_code}); starting it again "
+                f"automatically (retry {other_failures} of {auto_retries}). "
+                "The failed attempt's log is kept next to makemkv.log."
+            ),
+            from_status=None,
+            to_status=None,
+        )
+        conn.commit()
+        _clear_stale_rip_output(output_dir)
         _wait_for_drive(conn, job_id, DISC_OPEN_RETRY_DELAY_SECONDS)
 
 
@@ -1716,6 +1851,13 @@ def _describe_makemkv_failure(log_text: str, log_path: Path) -> str:
             f"{stall.group(2)} MB. {cause}. Clean the disc, wiping from the centre straight "
             "outward, and retry; if it stops at the same point again, try another drive or have "
             f"the disc resurfaced. See log: {log_path}"
+        )
+
+    if _drive_lost_the_disc(log_text) and "failed to open disc" not in lowered:
+        return (
+            "The drive stopped seeing the disc partway through the rip (it reported the tray open "
+            "or no disc). That is the drive or its connection, not the disc: check the USB cable and "
+            f"power, try another port, and retry. See log: {log_path}"
         )
 
     if "failed to open disc" in lowered:

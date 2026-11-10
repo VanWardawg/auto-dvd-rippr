@@ -70,6 +70,23 @@ where it can.
 Configuration lives in `%APPDATA%\Auto-Ripper\config.json`, editable from the
 in-app Settings tab.
 
+### When the drive misbehaves
+
+Optical drives fail in ways that have nothing to do with the disc, and
+Auto-Ripper retries those on its own rather than waiting for you:
+
+- **The drive loses the disc** (it could not open it, or reported the tray open
+  partway through): the rip starts again after 2 minutes, then 4, 8, 16 and
+  every 30 after that, up to 8 times. It keeps waiting as long as the same disc
+  is in the drive or the drive shows none, and stops if a different disc goes
+  in.
+- **The rip fails partway for another reason:** it is started over once.
+- **The rip stalls** on an unreadable spot: it is stopped after 15 minutes
+  with nothing written, and not retried — the same spot would stall it again.
+
+All four numbers are in Settings. Each attempt's MakeMKV log is kept in the
+job's `logs` folder as `makemkv.attempt-N.log`.
+
 ### Notifications
 
 Auto-Ripper can tell you when a job needs you, so you do not have to watch it.

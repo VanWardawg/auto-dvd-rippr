@@ -534,6 +534,10 @@ export function buildConfigDraft(config?: Record<string, unknown> | null) {
     verify_transfers: String(source.verify_transfers ?? false),
     clear_local_after_transfer: String(source.clear_local_after_transfer ?? false),
     notify_webhook_url: String(source.notify_webhook_url ?? ""),
+    rip_drive_retries: String(source.rip_drive_retries ?? 8),
+    rip_drive_retry_minutes: String(source.rip_drive_retry_minutes ?? 2),
+    rip_auto_retries: String(source.rip_auto_retries ?? 1),
+    rip_stall_timeout_minutes: String(Math.round(Number(source.rip_stall_timeout_seconds ?? 900) / 60)),
   };
 }
 
@@ -546,8 +550,27 @@ export function buildConfigDraft(config?: Record<string, unknown> | null) {
  */
 export const BOOLEAN_CONFIG_KEYS = ["eject_after_rip", "verify_transfers", "clear_local_after_transfer"];
 
+/** Whole-number settings; a blank or mistyped field falls back to its default. */
+export const NUMERIC_CONFIG_DEFAULTS: Record<string, number> = {
+  rip_drive_retries: 8,
+  rip_drive_retry_minutes: 2,
+  rip_auto_retries: 1,
+};
+
 export function coerceConfigDraft(draft: Record<string, string>): Record<string, unknown> {
   const coerced: Record<string, unknown> = { ...draft };
+  for (const [key, fallback] of Object.entries(NUMERIC_CONFIG_DEFAULTS)) {
+    if (key in coerced) {
+      const parsed = Number.parseInt(String(coerced[key]), 10);
+      coerced[key] = Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+    }
+  }
+  // Shown in minutes because nobody thinks in 900 seconds; stored in seconds.
+  if ("rip_stall_timeout_minutes" in coerced) {
+    const minutes = Number.parseInt(String(coerced.rip_stall_timeout_minutes), 10);
+    coerced.rip_stall_timeout_seconds = Number.isFinite(minutes) && minutes >= 0 ? minutes * 60 : 900;
+    delete coerced.rip_stall_timeout_minutes;
+  }
   for (const key of BOOLEAN_CONFIG_KEYS) {
     if (key in coerced) {
       coerced[key] = String(coerced[key]) === "true";

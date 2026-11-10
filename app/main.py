@@ -568,6 +568,10 @@ def _build_review_state(
         # of its timestamps freeze together when the process writing them dies.
         abandoned_seconds = _seconds_since_heartbeat(progress_row)
         stall_seconds = _seconds_since_last_advance(progress_row)
+        if str((progress_row or {}).get("kind") or "") == "waiting":
+            # Deliberately idle: backing off before retrying a drive that lost
+            # the disc. Still beating, so the abandoned check stays live.
+            stall_seconds = None
         if abandoned_seconds is not None and abandoned_seconds >= ABANDONED_RIP_SECONDS:
             rip_needed = True
             rip_reason = (

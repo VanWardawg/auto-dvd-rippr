@@ -99,7 +99,8 @@ TV and movie jobs take different paths: **TV identifies before ripping**
   renumbers titles after length filtering, so scanning with one value and
   ripping with another makes selected title IDs point at different titles.
 - Boolean config keys need coercion in `App.tsx` (`BOOLEAN_CONFIG_KEYS`)
-  because the settings form stores every field as a string.
+  because the settings form stores every field as a string. Whole-number keys
+  go in `NUMERIC_CONFIG_DEFAULTS` in `lib.ts` for the same reason.
 - Config keys are added in three places: `config.py` (`AppConfig` +
   validation), `app/config.example.json`, and the Settings tab in `App.tsx`.
 

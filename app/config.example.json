@@ -24,6 +24,8 @@
   "clear_local_after_transfer": false,
   "rip_stall_timeout_seconds": 900,
   "rip_auto_retries": 1,
+  "rip_drive_retries": 8,
+  "rip_drive_retry_minutes": 2,
   "notify_webhook_url": "",
   "show_overrides": {}
 }

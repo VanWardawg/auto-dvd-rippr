@@ -45,6 +45,19 @@ def _is_blank_or_placeholder(value: Any) -> bool:
     return upper.startswith("REPLACE_WITH_") or upper.startswith("YOUR_")
 
 
+def _as_int(value: Any, default: int, minimum: int = 0) -> int:
+    """
+    Coerce a config value to a whole number, tolerating strings.
+
+    The settings form saves every field as text, and a person can leave one
+    blank or type "2.5". Neither should stop the app from starting.
+    """
+    try:
+        return max(minimum, int(float(str(value).strip())))
+    except (TypeError, ValueError):
+        return default
+
+
 def _as_bool(value: Any, default: bool = False) -> bool:
     """
     Coerce a config value to bool, tolerating strings.
@@ -122,6 +135,14 @@ class AppConfig:
     # one of the first 25 recorded rip failures was cured by pressing Resume;
     # the cost was the 26 hours the jobs spent waiting for someone to press it.
     rip_auto_retries: int = 1
+    # A drive that stops seeing the disc -- "MEDIUM NOT PRESENT - TRAY OPEN"
+    # partway through a read -- is a different failure from a bad disc: nothing
+    # is wrong with the media, and the same rip usually works once the drive
+    # settles. These get their own, larger budget, spaced out: the first retry
+    # waits rip_drive_retry_minutes, and each one after waits twice as long,
+    # up to half an hour. 0 retries turns it off.
+    rip_drive_retries: int = 8
+    rip_drive_retry_minutes: int = 2
     # POST a small JSON document here when a job needs a person, fails, or
     # finishes. Empty means no notifications. The URL is a secret: see
     # notify.py.
@@ -213,8 +234,10 @@ def load_config(config_path: str) -> AppConfig:
         eject_after_rip=_as_bool(merged.get("eject_after_rip"), False),
         verify_transfers=_as_bool(merged.get("verify_transfers"), False),
         clear_local_after_transfer=_as_bool(merged.get("clear_local_after_transfer"), False),
-        rip_stall_timeout_seconds=max(0, int(merged.get("rip_stall_timeout_seconds", 900))),
-        rip_auto_retries=max(0, int(merged.get("rip_auto_retries", 1))),
+        rip_stall_timeout_seconds=_as_int(merged.get("rip_stall_timeout_seconds", 900), 900),
+        rip_auto_retries=_as_int(merged.get("rip_auto_retries", 1), 1),
+        rip_drive_retries=_as_int(merged.get("rip_drive_retries", 8), 8),
+        rip_drive_retry_minutes=_as_int(merged.get("rip_drive_retry_minutes", 2), 2, minimum=1),
         notify_webhook_url=str(merged.get("notify_webhook_url") or "").strip(),
     )
 
