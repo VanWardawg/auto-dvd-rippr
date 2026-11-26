@@ -255,6 +255,13 @@ class TokenOverlapTests(unittest.TestCase):
         """Two-letter words carry no signal and would inflate every score."""
         self.assertEqual(_episode_token_overlap_score("a b c", "of to it"), 0.0)
 
+    def test_token_overlap_ignores_fragments_of_a_title_word(self) -> None:
+        # OCR junk from Teen Titans frames; each is inside "transformation".
+        self.assertEqual(_episode_token_overlap_score("ran for mat ion ans", "transformation"), 0.0)
+        self.assertEqual(_episode_token_overlap_score("aft sho hoc", "aftershock 1"), 0.0)
+        # A title word with an end clipped off still counts.
+        self.assertEqual(_episode_token_overlap_score("transformatio", "transformation"), 1.0)
+
 
 class ContiguousMatchTests(unittest.TestCase):
     """A menu listing consecutive episodes is strong evidence of ordering."""

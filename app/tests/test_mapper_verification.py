@@ -132,6 +132,27 @@ class PositionalVerificationTests(unittest.TestCase):
         self.assertIn("B1_t00.mkv", warning[0].args[3])
         self.assertIn("Dance Mode", warning[0].args[3])
 
+    def test_a_title_read_off_several_files_identifies_none_of_them(self) -> None:
+        """
+        "Terra" is an episode and a character the season keeps naming. Read off
+        two files, it is not a title card on either, so neither row is
+        contradicted -- nor is the one that happens to be assigned it confirmed.
+        """
+        season = targets("How Long Is Forever?", "Terra", "Only Human")
+        rows = [positional_row(i + 1, t) for i, t in enumerate(season)]
+        summary, _ = self.verify(
+            rows,
+            rip_rows("t00.mkv", "t01.mkv", "t02.mkv"),
+            season,
+            {1: ["where is terra"], 2: ["terra come back"], 3: ["only human"]},
+        )
+        self.assertEqual(summary["contradicted"], 0)
+        self.assertEqual(summary["confirmed"], 1)
+        self.assertEqual(rows[0]["verification"]["status"], "inconclusive")
+        self.assertEqual(rows[1]["verification"]["status"], "inconclusive")
+        self.assertEqual(rows[2]["verification"]["status"], "confirmed")
+        self.assertEqual(rows[0]["confidence"], 0.94)
+
     def test_ocr_agreeing_with_position_confirms_the_row(self) -> None:
         season = targets("Perfect", "Whale Watching")
         row = positional_row(1, season[0])

@@ -62,6 +62,85 @@ class EpisodeTarget:
 
 
 
+_DISC_INFO_TITLE_FIELD = re.compile(r'^TINFO:(\d+),(9|16|26),\d+,"(.*)"\s*$')
+
+
+def _rows_in_stream_order(cfg: AppConfig, job_id: str, rip_rows) -> list[Any] | None:
+    """
+    The ripped titles in the order their video is stored on a Blu-ray, or None
+    when that is unknown or no different from the title order.
+
+    MakeMKV numbers Blu-ray titles in an order of its own, and position was the
+    only evidence the in-order fast path had. The Teen Titans season 2 disc
+    lists its thirteen episodes as titles 2, 1, 0, 11, 10, 12, 9, 8, 7, 5, 4,
+    3, 6: every one mapped to the wrong episode. Its playlists are numbered
+    out of order too (00001-00007, 00012, 00013, 00101-00104), but the .m2ts
+    streams those playlists play are numbered 1-7 and 12-17 in episode order,
+    because that is the order the disc was authored in.
+
+    Only applied when every episode-length title is a Blu-ray title whose scan
+    still describes the file that was ripped, so a DVD, a rip without a scan,
+    or a scan whose numbering has drifted leaves the order exactly as it was.
+    """
+    if cfg is None:
+        return None
+    info_path = Path(cfg.staging_root) / "jobs" / job_id / "logs" / "makemkv_disc_info.log"
+    try:
+        info_text = info_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    scanned: dict[int, dict[str, str]] = {}
+    for line in info_text.splitlines():
+        match = _DISC_INFO_TITLE_FIELD.match(line)
+        if match:
+            scanned.setdefault(int(match.group(1)), {})[match.group(2)] = match.group(3)
+
+    first_stream: dict[int, int] = {}
+    for row in rip_rows:
+        fields = scanned.get(int(row["title_id"]))
+        duration = float(row["duration_seconds"] or 0.0)
+        if not fields:
+            if duration >= 8 * 60:
+                return None
+            continue
+        source = fields.get("16", "").lower()
+        streams = re.findall(r"\d+", fields.get("26", ""))
+        scanned_seconds = _clock_seconds(fields.get("9", ""))
+        usable = (
+            source.endswith((".mpls", ".m2ts"))
+            and streams
+            and scanned_seconds is not None
+            and abs(scanned_seconds - duration) <= 5.0
+        )
+        if usable:
+            first_stream[int(row["id"])] = int(streams[0])
+        elif duration >= 8 * 60:
+            return None
+    if not first_stream:
+        return None
+
+    # Titles the scan says nothing about are short extras; they keep their
+    # place at the end, where the title order had them anyway.
+    ordered = sorted(
+        rip_rows,
+        key=lambda row: (
+            int(row["id"]) not in first_stream,
+            first_stream.get(int(row["id"]), 0),
+        ),
+    )
+    if [int(r["id"]) for r in ordered] == [int(r["id"]) for r in rip_rows]:
+        return None
+    return ordered
+
+
+def _clock_seconds(value: str) -> float | None:
+    """ "0:21:43" as seconds; None for anything else."""
+    parts = value.strip().split(":")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        return None
+    return int(parts[0]) * 3600.0 + int(parts[1]) * 60.0 + int(parts[2])
+
+
 def _job_disc_drive(conn, job_id: str) -> str | None:
     """The drive this job's disc was read from, if it is recorded."""
     row = conn.execute("SELECT optical_drive FROM jobs WHERE id = ?", (job_id,)).fetchone()
@@ -364,6 +443,21 @@ def map_job_episodes(conn, cfg: AppConfig, job_id: str) -> dict[str, Any]:
             )
 
     _clear_downstream_state_for_remap(conn, cfg, job_id)
+    stream_ordered = _rows_in_stream_order(cfg, job_id, rip_rows)
+    if stream_ordered is not None:
+        append_job_log(
+            conn,
+            job_id,
+            "INFO",
+            (
+                "This Blu-ray lists its titles out of order; episodes are assigned in the order "
+                "the video streams are stored on the disc instead: "
+                + ", ".join(Path(str(r["source_file"] or "")).name for r in stream_ordered)
+            ),
+            None,
+            None,
+        )
+        rip_rows = stream_ordered
     if single_target is not None:
         planned = _plan_single_episode(rip_rows, single_target)
     else:
@@ -1047,6 +1141,7 @@ def _verify_positional_assignments(
         return summary
 
     source_by_rip_id = {int(r["id"]): str(r["source_file"] or "") for r in rip_rows}
+    readings: list[tuple[dict[str, Any], str, dict[str, Any], float]] = []
     for row in positional_rows:
         rip_title_id = int(row["rip_title_id"])
         source_file = source_by_rip_id.get(rip_title_id)
@@ -1073,9 +1168,24 @@ def _verify_positional_assignments(
                     best = match
         if best is None:
             continue
+        readings.append((row, source_file, best, assigned_score))
 
+    # An episode title read off several files identifies none of them: it is a
+    # word the show keeps saying ("Terra" is both an episode and a character
+    # named in half the season), not a title card.
+    times_read: dict[int, int] = {}
+    for _, _, best, _ in readings:
+        episode_id = best["episode"].tmdb_episode_id
+        times_read[episode_id] = times_read.get(episode_id, 0) + 1
+
+    for row, source_file, best, assigned_score in readings:
+        rip_title_id = int(row["rip_title_id"])
+        assigned_id = int(row["tmdb_episode_ids"][0])
         summary["checked"] += 1
         best_episode: EpisodeTarget = best["episode"]
+        if times_read[best_episode.tmdb_episode_id] > 1:
+            row["verification"] = {"status": "inconclusive", "score": float(best["score"])}
+            continue
         best_score = float(best["score"])
         if best_episode.tmdb_episode_id == assigned_id:
             summary["confirmed"] += 1
@@ -2758,8 +2868,24 @@ def _episode_token_overlap_score(text_value: str, episode_name: str) -> float:
     ep_tokens = [t for t in episode_name.split() if len(t) >= 3]
     if not text_tokens or not ep_tokens:
         return 0.0
-    overlap = sum(1 for t in ep_tokens if any(t == x or t in x or x in t for x in text_tokens))
+    overlap = sum(1 for t in ep_tokens if any(_token_matches(t, x) for x in text_tokens))
     return overlap / max(1, len(ep_tokens))
+
+
+def _token_matches(title_token: str, text_token: str) -> bool:
+    """
+    Whether a word read off the screen is a word of the episode title.
+
+    A read word may carry extra letters around the title word ("trains" for
+    "train"), or be the title word with an end clipped off. It may not be a
+    mere fragment of it: OCR of cartoon frames yields a stream of three-letter
+    junk, and "ran", "for" and "mat" are all inside "transformation". That
+    scored a perfect match for 'Transformation' on six different Teen Titans
+    episodes, none of which was it.
+    """
+    if title_token == text_token or title_token in text_token:
+        return True
+    return text_token in title_token and len(text_token) * 3 >= len(title_token) * 2 and len(text_token) >= 4
 
 
 def _normalize_name(value: str) -> str:
